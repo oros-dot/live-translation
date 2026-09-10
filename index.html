@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ponte — traduzione simultanea</title>
+<style>
+:root{
+  --paper:#FBFAF7; --ink:#1A1D23; --muted:#6E7480; --line:#E2DFD8;
+  --card:#FFFFFF; --them:#2E4A7D; --you:#4A6B3D; --warn:#A8422A;
+  --them-bg:#EDF1F8; --you-bg:#EFF3EA;
+}
+@media(prefers-color-scheme:dark){
+  :root{
+    --paper:#14161A; --ink:#E8E6E1; --muted:#8A9099; --line:#2A2E35;
+    --card:#1B1E24; --them:#8FB0E0; --you:#A3C48D; --warn:#D98A72;
+    --them-bg:#1C2430; --you-bg:#1F2620;
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  font-size:16px; line-height:1.55;
+}
+button,select,input{font:inherit;color:inherit}
+button{cursor:pointer}
+button:disabled{cursor:not-allowed;opacity:.4}
+:focus-visible{outline:2px solid var(--them);outline-offset:2px}
+
+/* ---- status bar ---- */
+.bar{
+  position:sticky;top:0;z-index:10;background:var(--paper);
+  border-bottom:1px solid var(--line);
+  display:flex;align-items:center;gap:20px;
+  padding:10px 20px;flex-wrap:wrap;
+}
+.mark{font-weight:600;letter-spacing:-.01em;margin-right:auto}
+.mark span{color:var(--muted);font-weight:400;margin-left:10px;font-size:14px}
+.ch{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
+.meter{width:52px;height:5px;background:var(--line);border-radius:3px;overflow:hidden}
+.meter i{display:block;height:100%;width:0;background:var(--muted);transition:width .08s linear}
+.ch.live .meter i{background:currentColor}
+.ch.live{color:var(--ink)}
+.ch.them.live{color:var(--them)} .ch.you.live{color:var(--you)}
+
+/* ---- setup ---- */
+.setup{padding:20px;border-bottom:1px solid var(--line);display:grid;gap:16px;max-width:900px}
+.row{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
+label{display:block;font-size:13px;color:var(--muted);margin-bottom:5px}
+select,input[type=text]{
+  background:var(--card);border:1px solid var(--line);border-radius:7px;
+  padding:8px 10px;min-width:150px;
+}
+input[type=text]{min-width:280px}
+.btn{
+  background:var(--ink);color:var(--paper);border:1px solid var(--ink);
+  border-radius:7px;padding:9px 16px;font-weight:500;
+}
+.btn.ghost{background:transparent;color:var(--ink);border-color:var(--line)}
+.btn.stop{background:var(--warn);border-color:var(--warn);color:#fff}
+.note{font-size:13.5px;color:var(--muted);max-width:68ch;margin:0}
+.note b{color:var(--ink);font-weight:500}
+progress{width:100%;max-width:420px;height:6px}
+
+/* ---- stream ---- */
+main{padding:22px 20px 80px;max-width:820px}
+.turn{
+  border-left:3px solid var(--line);padding:2px 0 2px 16px;margin-bottom:22px;
+  animation:in .18s ease-out;
+}
+@keyframes in{from{opacity:0}to{opacity:1}}
+@media(prefers-reduced-motion:reduce){.turn{animation:none}}
+.turn.them{border-color:var(--them)}
+.turn.you{border-color:var(--you)}
+.who{font-size:12.5px;color:var(--muted);margin-bottom:4px;display:flex;gap:10px}
+.turn.them .who b{color:var(--them)} .turn.you .who b{color:var(--you)}
+.who b{font-weight:500}
+.src{font-size:14.5px;color:var(--muted);margin:0 0 5px}
+.dst{font-size:19px;line-height:1.45;margin:0;max-width:64ch}
+.dst.pending{color:var(--muted);font-style:italic}
+.empty{color:var(--muted);max-width:60ch}
+
+details{border-top:1px solid var(--line);padding:16px 20px;max-width:900px}
+summary{cursor:pointer;font-size:14px;color:var(--muted)}
+details .row{margin-top:14px}
+.err{color:var(--warn);font-size:14px;max-width:68ch}
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <div class="mark">Ponte<span id="state">modelli non caricati</span></div>
+  <div class="ch them" id="chThem"><span>loro</span><div class="meter"><i></i></div></div>
+  <div class="ch you" id="chYou"><span>tu</span><div class="meter"><i></i></div></div>
+</div>
+
+<section class="setup">
+  <div class="row">
+    <div><label for="langThem">Loro parlano</label><select id="langThem"></select></div>
+    <div><label for="langYou">Tu parli</label><select id="langYou"></select></div>
+    <button class="btn" id="load">Carica i modelli</button>
+  </div>
+
+  <progress id="prog" value="0" max="100" hidden></progress>
+  <p class="note" id="loadNote" hidden></p>
+
+  <div class="row">
+    <button class="btn ghost" id="btnThem" disabled>Ascolta la scheda della riunione</button>
+    <button class="btn ghost" id="btnYou" disabled>Ascolta il microfono</button>
+    <button class="btn ghost" id="save" disabled>Salva la trascrizione</button>
+  </div>
+
+  <p class="note">
+    <b>Come si usa.</b> Apri Zoom, Meet o Teams in un'altra scheda di Chrome.
+    Premi <b>Ascolta la scheda della riunione</b> e scegli quella scheda, spuntando
+    <b>Condividi anche l'audio della scheda</b>. Poi premi <b>Ascolta il microfono</b>.
+    Per far arrivare a loro la tua voce tradotta, dentro la riunione condividi
+    <b>questa</b> scheda con l'audio attivo, e mettiti in muto nella riunione.
+  </p>
+  <p class="err" id="err" hidden></p>
+</section>
+
+<main id="stream">
+  <p class="empty">La conversazione comparirà qui, con l'originale sopra e la traduzione sotto.</p>
+</main>
+
+<details>
+  <summary>Impostazioni avanzate</summary>
+  <div class="row">
+    <div><label for="mAsr">Modello di ascolto</label>
+      <input type="text" id="mAsr" value="onnx-community/whisper-base"></div>
+    <div><label for="mMt">Modello di traduzione</label>
+      <input type="text" id="mMt" value="Xenova/nllb-200-distilled-600M"></div>
+  </div>
+  <div class="row">
+    <div><label for="ttsMode">Voce in uscita</label>
+      <select id="ttsMode">
+        <option value="model">Modello locale (consigliato)</option>
+        <option value="native">Voce di sistema</option>
+        <option value="off">Nessuna voce, solo testo</option>
+      </select></div>
+    <div><label for="sil">Pausa che chiude una frase (ms)</label>
+      <input type="text" id="sil" value="700" style="min-width:110px"></div>
+    <div><label for="thr">Soglia di voce</label>
+      <input type="text" id="thr" value="0.010" style="min-width:110px"></div>
+  </div>
+  <p class="note">
+    La voce di sistema è immediata ma potrebbe non finire nell'audio condiviso della scheda,
+    quindi loro non la sentirebbero. Il modello locale scarica una voce per lingua la prima
+    volta e suona dentro la pagina, quindi viene sempre trasmessa.
+    Se un modello non si carica, il nome è probabilmente cambiato: cercalo su huggingface.co e incollalo qui.
+  </p>
+</details>
+
+<script type="module">
+import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5';
+
+env.allowLocalModels = false;
+
+const LANGS = {
+  it:{name:'Italiano',   whisper:'it', nllb:'ita_Latn', tts:'Xenova/mms-tts-ita', bcp:'it-IT'},
+  fi:{name:'Finlandese', whisper:'fi', nllb:'fin_Latn', tts:'Xenova/mms-tts-fin', bcp:'fi-FI'},
+  en:{name:'Inglese',    whisper:'en', nllb:'eng_Latn', tts:'Xenova/mms-tts-eng', bcp:'en-US'},
+  es:{name:'Spagnolo',   whisper:'es', nllb:'spa_Latn', tts:'Xenova/mms-tts-spa', bcp:'es-ES'},
+  fr:{name:'Francese',   whisper:'fr', nllb:'fra_Latn', tts:'Xenova/mms-tts-fra', bcp:'fr-FR'},
+  de:{name:'Tedesco',    whisper:'de', nllb:'deu_Latn', tts:'Xenova/mms-tts-deu', bcp:'de-DE'},
+  pt:{name:'Portoghese', whisper:'pt', nllb:'por_Latn', tts:'Xenova/mms-tts-por', bcp:'pt-PT'},
+  ru:{name:'Russo',      whisper:'ru', nllb:'rus_Cyrl', tts:'Xenova/mms-tts-rus', bcp:'ru-RU'},
+  sv:{name:'Svedese',    whisper:'sv', nllb:'swe_Latn', tts:'Xenova/mms-tts-swe', bcp:'sv-SE'},
+  nl:{name:'Olandese',   whisper:'nl', nllb:'nld_Latn', tts:'Xenova/mms-tts-nld', bcp:'nl-NL'},
+  pl:{name:'Polacco',    whisper:'pl', nllb:'pol_Latn', tts:'Xenova/mms-tts-pol', bcp:'pl-PL'},
+  da:{name:'Danese',     whisper:'da', nllb:'dan_Latn', tts:'Xenova/mms-tts-dan', bcp:'da-DK'},
+  no:{name:'Norvegese',  whisper:'no', nllb:'nob_Latn', tts:'Xenova/mms-tts-nob', bcp:'nb-NO'},
+  et:{name:'Estone',     whisper:'et', nllb:'est_Latn', tts:'Xenova/mms-tts-est', bcp:'et-EE'},
+  ro:{name:'Rumeno',     whisper:'ro', nllb:'ron_Latn', tts:'Xenova/mms-tts-ron', bcp:'ro-RO'},
+};
+
+const $ = id => document.getElementById(id);
+const SR = 16000, FRAME = 128;
+
+const ui = {
+  state:$('state'), prog:$('prog'), loadNote:$('loadNote'), err:$('err'),
+  stream:$('stream'), load:$('load'), btnThem:$('btnThem'), btnYou:$('btnYou'), save:$('save'),
+  langThem:$('langThem'), langYou:$('langYou'),
+};
+
+for (const sel of [ui.langThem, ui.langYou]) {
+  for (const [code, l] of Object.entries(LANGS)) {
+    sel.append(new Option(l.name, code));
+  }
+}
+ui.langThem.value = 'fi';
+ui.langYou.value  = 'it';
+
+let asr = null, mt = null;
+const ttsCache = new Map();
+const queue = [];
+let working = false;
+let playCtx = null;
+const log = [];
+
+function setState(t){ ui.state.textContent = t; }
+function showErr(t){ ui.err.hidden = !t; ui.err.textContent = t || ''; }
+
+/* ---------------- model loading ---------------- */
+
+ui.load.addEventListener('click', async () => {
+  ui.load.disabled = true;
+  showErr('');
+  ui.prog.hidden = false;
+  ui.loadNote.hidden = false;
+  const seen = new Map();
+
+  const onProgress = p => {
+    if (p.status === 'progress' && p.file) {
+      seen.set(p.file, {loaded:p.loaded||0, total:p.total||0});
+      let l = 0, t = 0;
+      for (const v of seen.values()) { l += v.loaded; t += v.total; }
+      if (t) {
+        ui.prog.value = Math.min(99, (l/t)*100);
+        ui.loadNote.textContent =
+          `Scarico ${(l/1048576).toFixed(0)} MB di ${(t/1048576).toFixed(0)} MB. Succede solo la prima volta.`;
+      }
+    }
+  };
+
+  try {
+    setState('carico l\'ascolto');
+    try {
+      asr = await pipeline('automatic-speech-recognition', $('mAsr').value.trim(), {
+        device:'webgpu',
+        dtype:{ encoder_model:'fp32', decoder_model_merged:'q4' },
+        progress_callback:onProgress,
+      });
+    } catch (e) {
+      console.warn('WebGPU non disponibile, passo a WASM', e);
+      ui.loadNote.textContent = 'WebGPU non disponibile: uso la CPU, sarà più lento.';
+      asr = await pipeline('automatic-speech-recognition', $('mAsr').value.trim(), {
+        progress_callback:onProgress,
+      });
+    }
+
+    setState('carico la traduzione');
+    mt = await pipeline('translation', $('mMt').value.trim(), { progress_callback:onProgress });
+
+    ui.prog.value = 100;
+    ui.prog.hidden = true;
+    ui.loadNote.textContent = 'Modelli pronti e salvati nel browser. I prossimi avvii sono immediati.';
+    setState('pronto');
+    ui.btnThem.disabled = false;
+    ui.btnYou.disabled = false;
+  } catch (e) {
+    console.error(e);
+    ui.prog.hidden = true;
+    ui.loadNote.hidden = true;
+    setState('caricamento fallito');
+    showErr('Non sono riuscito a caricare i modelli: ' + e.message +
+      '. Controlla i nomi in Impostazioni avanzate, e che la pagina sia servita via https o localhost.');
+    ui.load.disabled = false;
+  }
+});
+
+/* ---------------- audio capture ---------------- */
+
+const workletSrc = `
+class Tap extends AudioWorkletProcessor {
+  process(inputs){
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) this.port.postMessage(new Float32Array(ch));
+    return true;
+  }
+}
+registerProcessor('tap', Tap);
+`;
+const workletURL = URL.createObjectURL(new Blob([workletSrc], {type:'application/javascript'}));
+
+class Channel {
+  constructor(side, el, btn, startLabel){
+    this.side = side;            // 'them' | 'you'
+    this.el = el; this.btn = btn; this.startLabel = startLabel;
+    this.active = false;
+    this.buf = []; this.pre = []; this.speaking = false; this.silence = 0; this.dur = 0;
+    btn.addEventListener('click', () => this.active ? this.stop() : this.start());
+  }
+
+  async start(){
+    showErr('');
+    try {
+      if (this.side === 'them') {
+        this.media = await navigator.mediaDevices.getDisplayMedia({
+          video:true,
+          audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false },
+        });
+        if (!this.media.getAudioTracks().length) {
+          this.media.getTracks().forEach(t => t.stop());
+          throw new Error('Quella scheda è stata condivisa senza audio. Riprova spuntando "Condividi anche l\'audio della scheda".');
+        }
+        this.media.getVideoTracks()[0].addEventListener('ended', () => this.stop());
+      } else {
+        this.media = await navigator.mediaDevices.getUserMedia({
+          audio:{ echoCancellation:true, noiseSuppression:true, autoGainControl:true },
+        });
+      }
+
+      this.ctx = new AudioContext({sampleRate:SR});
+      await this.ctx.audioWorklet.addModule(workletURL);
+      const src = this.ctx.createMediaStreamSource(this.media);
+      const tap = new AudioWorkletNode(this.ctx, 'tap');
+      tap.port.onmessage = e => this.frame(e.data);
+      src.connect(tap);
+      // deliberately not connected to destination: nothing is played back, no loop
+
+      this.active = true;
+      this.el.classList.add('live');
+      this.btn.textContent = this.side === 'them' ? 'Ferma l\'ascolto della riunione' : 'Ferma il microfono';
+      this.btn.classList.add('stop');
+      ui.save.disabled = false;
+    } catch (e) {
+      if (e.name !== 'NotAllowedError') showErr(e.message);
+      this.cleanup();
+    }
+  }
+
+  stop(){
+    if (this.buf.length) this.flush();
+    this.cleanup();
+  }
+
+  cleanup(){
+    try { this.media?.getTracks().forEach(t => t.stop()); } catch {}
+    try { this.ctx?.close(); } catch {}
+    this.media = this.ctx = null;
+    this.active = false; this.speaking = false; this.buf = []; this.pre = []; this.dur = 0;
+    this.el.classList.remove('live');
+    this.el.querySelector('.meter i').style.width = '0';
+    this.btn.textContent = this.startLabel;
+    this.btn.classList.remove('stop');
+  }
+
+  frame(f){
+    let sum = 0;
+    for (let i = 0; i < f.length; i++) sum += f[i]*f[i];
+    const rms = Math.sqrt(sum/f.length);
+    this.el.querySelector('.meter i').style.width = Math.min(100, rms*900) + '%';
+
+    const thr = parseFloat($('thr').value) || 0.010;
+    const maxSil = parseInt($('sil').value, 10) || 700;
+    const ms = (f.length / SR) * 1000;
+
+    if (rms > thr) {
+      if (!this.speaking) {          // prepend the pre-roll so we don't clip the first word
+        this.speaking = true;
+        this.buf = this.pre.slice();
+        this.dur = this.buf.length * FRAME / SR;
+      }
+      this.silence = 0;
+      this.buf.push(f); this.dur += ms/1000;
+    } else if (this.speaking) {
+      this.silence += ms;
+      this.buf.push(f); this.dur += ms/1000;
+      if (this.silence >= maxSil) this.flush();
+    } else {
+      this.pre.push(f);
+      if (this.pre.length > 40) this.pre.shift();   // ~320 ms of pre-roll
+    }
+
+    if (this.speaking && this.dur > 22) this.flush();   // hard cap for long monologues
+  }
+
+  flush(){
+    const frames = this.buf;
+    this.buf = []; this.pre = []; this.speaking = false; this.silence = 0;
+    const total = frames.reduce((n,f) => n + f.length, 0);
+    if (total < SR * 0.35) return;                     // ignore blips under 350 ms
+    const audio = new Float32Array(total);
+    let o = 0;
+    for (const f of frames) { audio.set(f, o); o += f.length; }
+    enqueue(this.side, audio);
+  }
+}
+
+const chThem = new Channel('them', $('chThem'), ui.btnThem, 'Ascolta la scheda della riunione');
+const chYou  = new Channel('you',  $('chYou'),  ui.btnYou,  'Ascolta il microfono');
+
+/* ---------------- transcription queue ---------------- */
+
+function enqueue(side, audio){
+  const from = side === 'them' ? ui.langThem.value : ui.langYou.value;
+  const to   = side === 'them' ? ui.langYou.value  : ui.langThem.value;
+  const node = addTurn(side, from, to);
+  queue.push({side, audio, from, to, node});
+  run();
+}
+
+async function run(){
+  if (working) return;
+  working = true;
+  while (queue.length) {
+    const job = queue.shift();
+    try {
+      const r = await asr(job.audio, {
+        language: LANGS[job.from].whisper,
+        task: 'transcribe',
+        chunk_length_s: 30,
+      });
+      const text = (r.text || '').trim();
+      if (!text || /^[\s.,!?…-]*$/.test(text)) { job.node.remove(); continue; }
+      job.node.querySelector('.src').textContent = text;
+
+      const out = await mt(text, {
+        src_lang: LANGS[job.from].nllb,
+        tgt_lang: LANGS[job.to].nllb,
+      });
+      const translated = (out[0]?.translation_text || '').trim();
+      const dst = job.node.querySelector('.dst');
+      dst.textContent = translated;
+      dst.classList.remove('pending');
+
+      log.push(`[${job.node.dataset.time}] ${job.side === 'them' ? 'LORO' : 'TU'}\n  ${text}\n  → ${translated}\n`);
+
+      if (job.side === 'you' && translated) speak(translated, job.to);
+    } catch (e) {
+      console.error(e);
+      const dst = job.node.querySelector('.dst');
+      dst.textContent = 'Questo passaggio non è stato elaborato.';
+      dst.classList.remove('pending');
+      showErr('Errore durante l\'elaborazione: ' + e.message);
+    }
+  }
+  working = false;
+}
+
+function addTurn(side, from, to){
+  ui.stream.querySelector('.empty')?.remove();
+  const time = new Date().toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+  const d = document.createElement('article');
+  d.className = 'turn ' + side;
+  d.dataset.time = time;
+  d.innerHTML =
+    `<div class="who"><b>${side === 'them' ? 'Loro' : 'Tu'}</b>` +
+    `<span>${LANGS[from].name} → ${LANGS[to].name}</span><span>${time}</span></div>` +
+    `<p class="src">…</p><p class="dst pending">in ascolto</p>`;
+  ui.stream.append(d);
+  d.scrollIntoView({block:'end', behavior:'smooth'});
+  return d;
+}
+
+/* ---------------- speaking out ---------------- */
+
+async function speak(text, lang){
+  const mode = $('ttsMode').value;
+  if (mode === 'off') return;
+
+  if (mode === 'native') { native(text, lang); return; }
+
+  try {
+    if (!ttsCache.has(lang)) {
+      setState('carico la voce ' + LANGS[lang].name);
+      ttsCache.set(lang, await pipeline('text-to-speech', LANGS[lang].tts));
+      setState('pronto');
+    }
+    const synth = ttsCache.get(lang);
+    const out = await synth(text);
+    playCtx ||= new AudioContext();
+    if (playCtx.state === 'suspended') await playCtx.resume();
+    const b = playCtx.createBuffer(1, out.audio.length, out.sampling_rate);
+    b.copyToChannel(out.audio instanceof Float32Array ? out.audio : Float32Array.from(out.audio), 0);
+    const s = playCtx.createBufferSource();
+    s.buffer = b;
+    s.connect(playCtx.destination);   // audible in this tab, so Zoom's tab-audio share carries it
+    s.start();
+  } catch (e) {
+    console.warn('Voce locale non disponibile, uso quella di sistema', e);
+    setState('pronto');
+    native(text, lang);
+  }
+}
+
+function native(text, lang){
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = LANGS[lang].bcp;
+    const v = speechSynthesis.getVoices().find(x => x.lang?.startsWith(lang));
+    if (v) u.voice = v;
+    speechSynthesis.speak(u);
+  } catch (e) { console.warn(e); }
+}
+
+/* ---------------- transcript export ---------------- */
+
+ui.save.addEventListener('click', () => {
+  const blob = new Blob([log.join('\n')], {type:'text/plain;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'trascrizione-' + new Date().toISOString().slice(0,16).replace(/[:T]/g,'-') + '.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+window.addEventListener('beforeunload', e => {
+  if (chThem.active || chYou.active) { e.preventDefault(); e.returnValue = ''; }
+});
+</script>
+</body>
+</html>
