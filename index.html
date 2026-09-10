@@ -1,484 +1,542 @@
 <!DOCTYPE html>
-<html lang="it">
+<html lang="it" data-theme="auto">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Ponte — traduzione simultanea</title>
+<title>Live Translation</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='4' y='4' width='38' height='38' rx='9' fill='%2325D366'/%3E%3Ctext x='23' y='33' font-family='Helvetica,Arial' font-size='26' font-weight='700' fill='%23fff' text-anchor='middle'%3EA%3C/text%3E%3Crect x='22' y='22' width='38' height='38' rx='9' fill='%23075E54'/%3E%3Ctext x='41' y='52' font-family='PingFang SC,Hiragino Sans,sans-serif' font-size='24' fill='%23fff' text-anchor='middle'%3E文%3C/text%3E%3C/svg%3E">
 <style>
 :root{
-  --paper:#FBFAF7; --ink:#1A1D23; --muted:#6E7480; --line:#E2DFD8;
-  --card:#FFFFFF; --them:#2E4A7D; --you:#4A6B3D; --warn:#A8422A;
-  --them-bg:#EDF1F8; --you-bg:#EFF3EA;
+  --bg:#EFE7DE; --panel:#F7F5F2; --head:#F0F2F5; --card:#FFFFFF;
+  --in:#FFFFFF; --out:#D9FDD3; --txt:#111B21; --meta:#667781;
+  --line:#D9DBDE; --accent:#128C7E; --danger:#B03A2E; --shadow:rgba(11,20,26,.13);
+}
+html[data-theme=dark]{
+  --bg:#0B141A; --panel:#111B21; --head:#202C33; --card:#182229;
+  --in:#202C33; --out:#005C4B; --txt:#E9EDEF; --meta:#8696A0;
+  --line:#2A3942; --accent:#00A884; --danger:#F15C6D; --shadow:rgba(0,0,0,.4);
 }
 @media(prefers-color-scheme:dark){
-  :root{
-    --paper:#14161A; --ink:#E8E6E1; --muted:#8A9099; --line:#2A2E35;
-    --card:#1B1E24; --them:#8FB0E0; --you:#A3C48D; --warn:#D98A72;
-    --them-bg:#1C2430; --you-bg:#1F2620;
+  html[data-theme=auto]{
+    --bg:#0B141A; --panel:#111B21; --head:#202C33; --card:#182229;
+    --in:#202C33; --out:#005C4B; --txt:#E9EDEF; --meta:#8696A0;
+    --line:#2A3942; --accent:#00A884; --danger:#F15C6D; --shadow:rgba(0,0,0,.4);
   }
 }
 *{box-sizing:border-box}
-html,body{margin:0;padding:0}
+html,body{margin:0;height:100%}
 body{
-  background:var(--paper); color:var(--ink);
-  font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  font-size:16px; line-height:1.55;
+  background:var(--bg); color:var(--txt);
+  font-family:system-ui,-apple-system,"Segoe UI",Helvetica,sans-serif;
+  font-size:16px; line-height:1.5;
+  display:flex; flex-direction:column; min-height:100vh;
 }
 button,select,input{font:inherit;color:inherit}
-button{cursor:pointer}
-button:disabled{cursor:not-allowed;opacity:.4}
-:focus-visible{outline:2px solid var(--them);outline-offset:2px}
+button{cursor:pointer;border:0;background:none}
+button:disabled{cursor:not-allowed;opacity:.45}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
-/* ---- status bar ---- */
-.bar{
-  position:sticky;top:0;z-index:10;background:var(--paper);
-  border-bottom:1px solid var(--line);
-  display:flex;align-items:center;gap:20px;
-  padding:10px 20px;flex-wrap:wrap;
+/* ---------- top bar ---------- */
+header{
+  background:var(--head); border-bottom:1px solid var(--line);
+  display:flex; align-items:center; gap:6px;
+  padding:10px 16px; position:sticky; top:0; z-index:20;
 }
-.mark{font-weight:600;letter-spacing:-.01em;margin-right:auto}
-.mark span{color:var(--muted);font-weight:400;margin-left:10px;font-size:14px}
-.ch{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
-.meter{width:52px;height:5px;background:var(--line);border-radius:3px;overflow:hidden}
-.meter i{display:block;height:100%;width:0;background:var(--muted);transition:width .08s linear}
-.ch.live .meter i{background:currentColor}
-.ch.live{color:var(--ink)}
-.ch.them.live{color:var(--them)} .ch.you.live{color:var(--you)}
+.name{font-size:17px;font-weight:600;letter-spacing:-.01em;margin-right:auto}
+.icon{
+  width:38px;height:38px;border-radius:50%;display:grid;place-items:center;
+  color:var(--meta);
+}
+.icon:hover{background:var(--line);color:var(--txt)}
+.icon svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.9;
+  stroke-linecap:round;stroke-linejoin:round}
+.moon,.sun{display:none}
+html[data-theme=light] .moon{display:block}
+html[data-theme=dark]  .sun{display:block}
+html[data-theme=auto]  .moon{display:block}
+@media(prefers-color-scheme:dark){
+  html[data-theme=auto] .moon{display:none}
+  html[data-theme=auto] .sun{display:block}
+}
 
-/* ---- setup ---- */
-.setup{padding:20px;border-bottom:1px solid var(--line);display:grid;gap:16px;max-width:900px}
-.row{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
-label{display:block;font-size:13px;color:var(--muted);margin-bottom:5px}
-select,input[type=text]{
-  background:var(--card);border:1px solid var(--line);border-radius:7px;
-  padding:8px 10px;min-width:150px;
+/* ---------- action strip ---------- */
+.actions{
+  display:flex;gap:10px;justify-content:center;flex-wrap:wrap;
+  padding:12px 16px; background:var(--panel); border-bottom:1px solid var(--line);
 }
-input[type=text]{min-width:280px}
-.btn{
-  background:var(--ink);color:var(--paper);border:1px solid var(--ink);
-  border-radius:7px;padding:9px 16px;font-weight:500;
+.act{
+  background:var(--card);border:1px solid var(--line);border-radius:20px;
+  padding:8px 18px;font-size:14.5px;font-weight:500;
+  display:flex;align-items:center;gap:8px;
 }
-.btn.ghost{background:transparent;color:var(--ink);border-color:var(--line)}
-.btn.stop{background:var(--warn);border-color:var(--warn);color:#fff}
-.note{font-size:13.5px;color:var(--muted);max-width:68ch;margin:0}
-.note b{color:var(--ink);font-weight:500}
-progress{width:100%;max-width:420px;height:6px}
+.act:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+.act.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.act.on:hover{color:#fff}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--meta)}
+.act.on .dot{background:#fff;animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.25}}
+@media(prefers-reduced-motion:reduce){.act.on .dot{animation:none}}
 
-/* ---- stream ---- */
-main{padding:22px 20px 80px;max-width:820px}
-.turn{
-  border-left:3px solid var(--line);padding:2px 0 2px 16px;margin-bottom:22px;
-  animation:in .18s ease-out;
-}
-@keyframes in{from{opacity:0}to{opacity:1}}
-@media(prefers-reduced-motion:reduce){.turn{animation:none}}
-.turn.them{border-color:var(--them)}
-.turn.you{border-color:var(--you)}
-.who{font-size:12.5px;color:var(--muted);margin-bottom:4px;display:flex;gap:10px}
-.turn.them .who b{color:var(--them)} .turn.you .who b{color:var(--you)}
-.who b{font-weight:500}
-.src{font-size:14.5px;color:var(--muted);margin:0 0 5px}
-.dst{font-size:19px;line-height:1.45;margin:0;max-width:64ch}
-.dst.pending{color:var(--muted);font-style:italic}
-.empty{color:var(--muted);max-width:60ch}
+/* ---------- chat ---------- */
+main{flex:1;overflow-y:auto;padding:20px 16px 40px}
+.thread{max-width:720px;margin:0 auto;display:flex;flex-direction:column;gap:10px}
+.msg{max-width:78%;padding:7px 11px 5px;border-radius:9px;position:relative;
+  box-shadow:0 1px .5px var(--shadow);animation:pop .16s ease-out}
+@keyframes pop{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+@media(prefers-reduced-motion:reduce){.msg{animation:none}}
+.msg.them{align-self:flex-start;background:var(--in);border-top-left-radius:2px}
+.msg.you{align-self:flex-end;background:var(--out);border-top-right-radius:2px}
+.msg::before{content:"";position:absolute;top:0;width:9px;height:13px}
+.msg.them::before{left:-8px;background:var(--in);
+  clip-path:polygon(100% 0,100% 100%,0 0)}
+.msg.you::before{right:-8px;background:var(--out);
+  clip-path:polygon(0 0,0 100%,100% 0)}
+.orig{font-size:13px;color:var(--meta);margin:0 0 3px;word-wrap:break-word}
+.trad{font-size:16.5px;margin:0;word-wrap:break-word}
+.trad.wait{color:var(--meta);font-style:italic}
+.stamp{font-size:11px;color:var(--meta);text-align:right;margin-top:2px;
+  font-variant-numeric:tabular-nums}
+.stamp b{font-weight:500;float:left;text-transform:none}
 
-details{border-top:1px solid var(--line);padding:16px 20px;max-width:900px}
-summary{cursor:pointer;font-size:14px;color:var(--muted)}
-details .row{margin-top:14px}
-.err{color:var(--warn);font-size:14px;max-width:68ch}
+/* ---------- empty state ---------- */
+.empty{max-width:420px;margin:14vh auto 0;text-align:center;color:var(--meta)}
+.empty h2{font-size:19px;font-weight:600;color:var(--txt);margin:0 0 8px}
+.empty p{margin:0 0 20px;font-size:15px}
+
+/* ---------- sheets ---------- */
+.scrim{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:30;
+  display:flex;justify-content:center;align-items:flex-start;padding:24px 16px;overflow-y:auto}
+.scrim[hidden]{display:none}
+.sheet{background:var(--panel);border-radius:14px;max-width:560px;width:100%;
+  padding:22px 24px 26px;box-shadow:0 12px 40px rgba(0,0,0,.3)}
+.sheet h2{margin:0 0 4px;font-size:19px;font-weight:600}
+.sheet h3{margin:22px 0 10px;font-size:14px;font-weight:600;color:var(--meta)}
+.sheet .close{position:relative;float:right;margin:-6px -8px 0 0}
+label{display:block;font-size:13px;color:var(--meta);margin-bottom:5px}
+select,input[type=text]{background:var(--card);border:1px solid var(--line);
+  border-radius:8px;padding:9px 11px;width:100%}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.grid.one{grid-template-columns:1fr}
+.primary{background:var(--accent);color:#fff;border-radius:8px;padding:10px 18px;
+  font-weight:500;width:100%;margin-top:14px}
+progress{width:100%;height:6px;margin-top:12px}
+.hint{font-size:13px;color:var(--meta);margin:8px 0 0}
+.hint.bad{color:var(--danger)}
+
+/* ---------- steps ---------- */
+ol.steps{list-style:none;counter-reset:s;margin:18px 0 0;padding:0}
+ol.steps li{counter-increment:s;position:relative;padding:0 0 20px 42px}
+ol.steps li::before{content:counter(s);position:absolute;left:0;top:1px;
+  width:27px;height:27px;border-radius:50%;background:var(--accent);color:#fff;
+  display:grid;place-items:center;font-size:14px;font-weight:600}
+ol.steps li:not(:last-child)::after{content:"";position:absolute;left:13px;top:32px;
+  bottom:4px;width:1px;background:var(--line)}
+ol.steps strong{display:block;font-size:15.5px;font-weight:600;margin-bottom:3px}
+ol.steps p{margin:0;font-size:14.5px;color:var(--meta);line-height:1.55}
+ol.steps em{font-style:normal;color:var(--txt);font-weight:500}
 </style>
 </head>
 <body>
 
-<div class="bar">
-  <div class="mark">Ponte<span id="state">modelli non caricati</span></div>
-  <div class="ch them" id="chThem"><span>loro</span><div class="meter"><i></i></div></div>
-  <div class="ch you" id="chYou"><span>tu</span><div class="meter"><i></i></div></div>
+<header>
+  <div class="name">Live Translation</div>
+  <button class="icon" id="bInfo" aria-label="Istruzioni" title="Istruzioni">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg>
+  </button>
+  <button class="icon" id="bSet" aria-label="Impostazioni" title="Impostazioni">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+  </button>
+  <button class="icon" id="bTheme" aria-label="Cambia tema" title="Cambia tema">
+    <svg class="moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+    <svg class="sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+  </button>
+</header>
+
+<div class="actions">
+  <button class="act" id="bThem" disabled><span class="dot"></span>Ascolta la riunione</button>
+  <button class="act" id="bYou" disabled><span class="dot"></span>Ascolta il microfono</button>
+  <button class="act" id="bSave" disabled>Salva la conversazione</button>
 </div>
 
-<section class="setup">
-  <div class="row">
-    <div><label for="langThem">Loro parlano</label><select id="langThem"></select></div>
-    <div><label for="langYou">Tu parli</label><select id="langYou"></select></div>
-    <button class="btn" id="load">Carica i modelli</button>
+<main>
+  <div class="thread" id="thread"></div>
+  <div class="empty" id="empty">
+    <h2>Nessuna conversazione</h2>
+    <p>Scegli le lingue e scarica i modelli. Serve solo la prima volta.</p>
+    <button class="act" id="bStart">Apri le impostazioni</button>
   </div>
-
-  <progress id="prog" value="0" max="100" hidden></progress>
-  <p class="note" id="loadNote" hidden></p>
-
-  <div class="row">
-    <button class="btn ghost" id="btnThem" disabled>Ascolta la scheda della riunione</button>
-    <button class="btn ghost" id="btnYou" disabled>Ascolta il microfono</button>
-    <button class="btn ghost" id="save" disabled>Salva la trascrizione</button>
-  </div>
-
-  <p class="note">
-    <b>Come si usa.</b> Apri Zoom, Meet o Teams in un'altra scheda di Chrome.
-    Premi <b>Ascolta la scheda della riunione</b> e scegli quella scheda, spuntando
-    <b>Condividi anche l'audio della scheda</b>. Poi premi <b>Ascolta il microfono</b>.
-    Per far arrivare a loro la tua voce tradotta, dentro la riunione condividi
-    <b>questa</b> scheda con l'audio attivo, e mettiti in muto nella riunione.
-  </p>
-  <p class="err" id="err" hidden></p>
-</section>
-
-<main id="stream">
-  <p class="empty">La conversazione comparirà qui, con l'originale sopra e la traduzione sotto.</p>
 </main>
 
-<details>
-  <summary>Impostazioni avanzate</summary>
-  <div class="row">
+<!-- settings -->
+<div class="scrim" id="setScrim" hidden>
+ <div class="sheet" role="dialog" aria-modal="true" aria-label="Impostazioni">
+  <button class="icon close" data-close aria-label="Chiudi">
+    <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+  <h2>Impostazioni</h2>
+
+  <h3>Lingue</h3>
+  <div class="grid">
+    <div><label for="langThem">Loro parlano</label><select id="langThem"></select></div>
+    <div><label for="langYou">Tu parli</label><select id="langYou"></select></div>
+  </div>
+  <button class="primary" id="bLoad">Scarica i modelli</button>
+  <progress id="prog" value="0" max="100" hidden></progress>
+  <p class="hint" id="loadHint"></p>
+
+  <h3>Voce in uscita</h3>
+  <div class="grid one">
+    <select id="voice">
+      <option value="auto">Automatica, la più naturale disponibile</option>
+      <option value="basic">Voce base, sempre disponibile</option>
+      <option value="system">Voce del Mac</option>
+      <option value="off">Nessuna voce, solo testo</option>
+    </select>
+  </div>
+  <p class="hint">La voce del Mac suona bene ma potrebbe non entrare nell'audio della
+    scheda condivisa, quindi loro non la sentirebbero. Le altre due suonano dentro la
+    pagina, quindi vengono sempre trasmesse.</p>
+
+  <h3>Regolazione fine</h3>
+  <div class="grid">
+    <div><label for="sil">Pausa che chiude una frase</label>
+      <input type="text" id="sil" value="700"></div>
+    <div><label for="thr">Soglia della voce</label>
+      <input type="text" id="thr" value="0.010"></div>
+  </div>
+  <p class="hint">Se ti taglia le frasi a metà alza la pausa. Se non parte mai, abbassa la soglia.</p>
+  <div class="grid" style="margin-top:12px">
     <div><label for="mAsr">Modello di ascolto</label>
       <input type="text" id="mAsr" value="onnx-community/whisper-base"></div>
     <div><label for="mMt">Modello di traduzione</label>
       <input type="text" id="mMt" value="Xenova/nllb-200-distilled-600M"></div>
   </div>
-  <div class="row">
-    <div><label for="ttsMode">Voce in uscita</label>
-      <select id="ttsMode">
-        <option value="model">Modello locale (consigliato)</option>
-        <option value="native">Voce di sistema</option>
-        <option value="off">Nessuna voce, solo testo</option>
-      </select></div>
-    <div><label for="sil">Pausa che chiude una frase (ms)</label>
-      <input type="text" id="sil" value="700" style="min-width:110px"></div>
-    <div><label for="thr">Soglia di voce</label>
-      <input type="text" id="thr" value="0.010" style="min-width:110px"></div>
-  </div>
-  <p class="note">
-    La voce di sistema è immediata ma potrebbe non finire nell'audio condiviso della scheda,
-    quindi loro non la sentirebbero. Il modello locale scarica una voce per lingua la prima
-    volta e suona dentro la pagina, quindi viene sempre trasmessa.
-    Se un modello non si carica, il nome è probabilmente cambiato: cercalo su huggingface.co e incollalo qui.
-  </p>
-</details>
+ </div>
+</div>
+
+<!-- instructions -->
+<div class="scrim" id="infoScrim" hidden>
+ <div class="sheet" role="dialog" aria-modal="true" aria-label="Istruzioni">
+  <button class="icon close" data-close aria-label="Chiudi">
+    <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+  <h2>Come si usa</h2>
+  <p class="hint">L'altra persona non deve installare né configurare niente.
+    Fa tutto il tuo computer.</p>
+
+  <ol class="steps">
+    <li><strong>Apri la riunione in una scheda del browser</strong>
+      <p>Zoom, Google Meet o Teams vanno bene, ma devi usare la versione web, non
+      l'applicazione installata. Lascia questa pagina aperta in una scheda accanto.</p></li>
+
+    <li><strong>Scegli le lingue e scarica i modelli</strong>
+      <p>Apri l'ingranaggio qui sopra. In <em>Loro parlano</em> metti la lingua dell'altra
+      persona, in <em>Tu parli</em> la tua. Premi <em>Scarica i modelli</em>: la prima volta
+      scarica qualche centinaio di megabyte, poi resta salvato nel browser e le volte
+      successive parte subito.</p></li>
+
+    <li><strong>Fai sentire la riunione al programma</strong>
+      <p>Premi <em>Ascolta la riunione</em>. Chrome ti chiede cosa vuoi condividere: scegli
+      <em>Scheda di Chrome</em>, seleziona la scheda della riunione e, prima di confermare,
+      attiva l'interruttore <em>Condividi anche l'audio della scheda</em>. Senza quell'interruttore
+      il programma vede la scheda ma non sente niente.</p></li>
+
+    <li><strong>Fai sentire la tua voce al programma</strong>
+      <p>Premi <em>Ascolta il microfono</em> e concedi il permesso. Da questo momento, ogni
+      volta che parli e fai una piccola pausa, la tua frase compare tradotta sulla destra.</p></li>
+
+    <li><strong>Fai arrivare a loro la tua voce tradotta</strong>
+      <p>Dentro la riunione avvia una condivisione schermo, scegli <em>questa</em> scheda e
+      attiva anche qui <em>Condividi anche l'audio della scheda</em>. Poi mettiti in muto nella
+      riunione: così loro sentono soltanto la voce tradotta, e non la tua che parla italiano.</p></li>
+
+    <li><strong>Parla a frasi, non a flusso continuo</strong>
+      <p>Il programma capisce che hai finito quando ti fermi per circa mezzo secondo. Frasi
+      brevi con una pausa alla fine funzionano molto meglio di un discorso senza respiro.
+      Se ti interrompe a metà, allunga la pausa nelle impostazioni.</p></li>
+  </ol>
+ </div>
+</div>
 
 <script type="module">
 import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5';
-
 env.allowLocalModels = false;
 
+/* voice: kokoro = natural neural voice, mms = plain fallback */
 const LANGS = {
-  it:{name:'Italiano',   whisper:'it', nllb:'ita_Latn', tts:'Xenova/mms-tts-ita', bcp:'it-IT'},
-  fi:{name:'Finlandese', whisper:'fi', nllb:'fin_Latn', tts:'Xenova/mms-tts-fin', bcp:'fi-FI'},
-  en:{name:'Inglese',    whisper:'en', nllb:'eng_Latn', tts:'Xenova/mms-tts-eng', bcp:'en-US'},
-  es:{name:'Spagnolo',   whisper:'es', nllb:'spa_Latn', tts:'Xenova/mms-tts-spa', bcp:'es-ES'},
-  fr:{name:'Francese',   whisper:'fr', nllb:'fra_Latn', tts:'Xenova/mms-tts-fra', bcp:'fr-FR'},
-  de:{name:'Tedesco',    whisper:'de', nllb:'deu_Latn', tts:'Xenova/mms-tts-deu', bcp:'de-DE'},
-  pt:{name:'Portoghese', whisper:'pt', nllb:'por_Latn', tts:'Xenova/mms-tts-por', bcp:'pt-PT'},
-  ru:{name:'Russo',      whisper:'ru', nllb:'rus_Cyrl', tts:'Xenova/mms-tts-rus', bcp:'ru-RU'},
-  sv:{name:'Svedese',    whisper:'sv', nllb:'swe_Latn', tts:'Xenova/mms-tts-swe', bcp:'sv-SE'},
-  nl:{name:'Olandese',   whisper:'nl', nllb:'nld_Latn', tts:'Xenova/mms-tts-nld', bcp:'nl-NL'},
-  pl:{name:'Polacco',    whisper:'pl', nllb:'pol_Latn', tts:'Xenova/mms-tts-pol', bcp:'pl-PL'},
-  da:{name:'Danese',     whisper:'da', nllb:'dan_Latn', tts:'Xenova/mms-tts-dan', bcp:'da-DK'},
-  no:{name:'Norvegese',  whisper:'no', nllb:'nob_Latn', tts:'Xenova/mms-tts-nob', bcp:'nb-NO'},
-  et:{name:'Estone',     whisper:'et', nllb:'est_Latn', tts:'Xenova/mms-tts-est', bcp:'et-EE'},
-  ro:{name:'Rumeno',     whisper:'ro', nllb:'ron_Latn', tts:'Xenova/mms-tts-ron', bcp:'ro-RO'},
+  it:{name:'Italiano',   w:'it', n:'ita_Latn', mms:'Xenova/mms-tts-ita', kok:'if_sara',   bcp:'it-IT'},
+  fi:{name:'Finlandese', w:'fi', n:'fin_Latn', mms:'Xenova/mms-tts-fin', kok:null,        bcp:'fi-FI'},
+  en:{name:'Inglese',    w:'en', n:'eng_Latn', mms:'Xenova/mms-tts-eng', kok:'af_heart',  bcp:'en-US'},
+  es:{name:'Spagnolo',   w:'es', n:'spa_Latn', mms:'Xenova/mms-tts-spa', kok:'ef_dora',   bcp:'es-ES'},
+  fr:{name:'Francese',   w:'fr', n:'fra_Latn', mms:'Xenova/mms-tts-fra', kok:'ff_siwis',  bcp:'fr-FR'},
+  pt:{name:'Portoghese', w:'pt', n:'por_Latn', mms:'Xenova/mms-tts-por', kok:'pf_dora',   bcp:'pt-PT'},
+  de:{name:'Tedesco',    w:'de', n:'deu_Latn', mms:'Xenova/mms-tts-deu', kok:null,        bcp:'de-DE'},
+  ru:{name:'Russo',      w:'ru', n:'rus_Cyrl', mms:'Xenova/mms-tts-rus', kok:null,        bcp:'ru-RU'},
+  sv:{name:'Svedese',    w:'sv', n:'swe_Latn', mms:'Xenova/mms-tts-swe', kok:null,        bcp:'sv-SE'},
+  no:{name:'Norvegese',  w:'no', n:'nob_Latn', mms:'Xenova/mms-tts-nob', kok:null,        bcp:'nb-NO'},
+  da:{name:'Danese',     w:'da', n:'dan_Latn', mms:'Xenova/mms-tts-dan', kok:null,        bcp:'da-DK'},
+  nl:{name:'Olandese',   w:'nl', n:'nld_Latn', mms:'Xenova/mms-tts-nld', kok:null,        bcp:'nl-NL'},
+  pl:{name:'Polacco',    w:'pl', n:'pol_Latn', mms:'Xenova/mms-tts-pol', kok:null,        bcp:'pl-PL'},
+  et:{name:'Estone',     w:'et', n:'est_Latn', mms:'Xenova/mms-tts-est', kok:null,        bcp:'et-EE'},
+  ro:{name:'Rumeno',     w:'ro', n:'ron_Latn', mms:'Xenova/mms-tts-ron', kok:null,        bcp:'ro-RO'},
 };
 
 const $ = id => document.getElementById(id);
 const SR = 16000, FRAME = 128;
+let asr = null, mt = null, kokoro = null, working = false, playCtx = null;
+const mmsCache = new Map(), queue = [], log = [];
 
-const ui = {
-  state:$('state'), prog:$('prog'), loadNote:$('loadNote'), err:$('err'),
-  stream:$('stream'), load:$('load'), btnThem:$('btnThem'), btnYou:$('btnYou'), save:$('save'),
-  langThem:$('langThem'), langYou:$('langYou'),
+/* ---------- theme ---------- */
+const store = {
+  get(k){ try { return localStorage.getItem(k); } catch { return null; } },
+  set(k,v){ try { localStorage.setItem(k,v); } catch {} },
 };
+document.documentElement.dataset.theme = store.get('theme') || 'auto';
+$('bTheme').addEventListener('click', () => {
+  const dark = matchMedia('(prefers-color-scheme:dark)').matches;
+  const now = document.documentElement.dataset.theme;
+  const next = now === 'auto' ? (dark ? 'light' : 'dark') : (now === 'dark' ? 'light' : 'dark');
+  document.documentElement.dataset.theme = next;
+  store.set('theme', next);
+});
 
-for (const sel of [ui.langThem, ui.langYou]) {
-  for (const [code, l] of Object.entries(LANGS)) {
-    sel.append(new Option(l.name, code));
-  }
+/* ---------- sheets ---------- */
+function open(el){ el.hidden = false; el.querySelector('[data-close]').focus(); }
+function close(el){ el.hidden = true; }
+$('bSet').addEventListener('click', () => open($('setScrim')));
+$('bInfo').addEventListener('click', () => open($('infoScrim')));
+$('bStart').addEventListener('click', () => open($('setScrim')));
+for (const s of [$('setScrim'), $('infoScrim')]) {
+  s.addEventListener('click', e => { if (e.target === s || e.target.closest('[data-close]')) close(s); });
 }
-ui.langThem.value = 'fi';
-ui.langYou.value  = 'it';
+addEventListener('keydown', e => {
+  if (e.key === 'Escape') { close($('setScrim')); close($('infoScrim')); }
+});
 
-let asr = null, mt = null;
-const ttsCache = new Map();
-const queue = [];
-let working = false;
-let playCtx = null;
-const log = [];
+/* ---------- language selects ---------- */
+for (const sel of [$('langThem'), $('langYou')])
+  for (const [c, l] of Object.entries(LANGS)) sel.append(new Option(l.name, c));
+$('langThem').value = store.get('them') || 'fi';
+$('langYou').value  = store.get('you')  || 'it';
+$('langThem').addEventListener('change', e => store.set('them', e.target.value));
+$('langYou').addEventListener('change',  e => store.set('you',  e.target.value));
+$('voice').value = store.get('voice') || 'auto';
+$('voice').addEventListener('change', e => store.set('voice', e.target.value));
 
-function setState(t){ ui.state.textContent = t; }
-function showErr(t){ ui.err.hidden = !t; ui.err.textContent = t || ''; }
-
-/* ---------------- model loading ---------------- */
-
-ui.load.addEventListener('click', async () => {
-  ui.load.disabled = true;
-  showErr('');
-  ui.prog.hidden = false;
-  ui.loadNote.hidden = false;
+/* ---------- model loading ---------- */
+$('bLoad').addEventListener('click', async () => {
+  $('bLoad').disabled = true;
+  $('prog').hidden = false;
+  $('loadHint').classList.remove('bad');
   const seen = new Map();
-
   const onProgress = p => {
-    if (p.status === 'progress' && p.file) {
-      seen.set(p.file, {loaded:p.loaded||0, total:p.total||0});
-      let l = 0, t = 0;
-      for (const v of seen.values()) { l += v.loaded; t += v.total; }
-      if (t) {
-        ui.prog.value = Math.min(99, (l/t)*100);
-        ui.loadNote.textContent =
-          `Scarico ${(l/1048576).toFixed(0)} MB di ${(t/1048576).toFixed(0)} MB. Succede solo la prima volta.`;
-      }
-    }
+    if (p.status !== 'progress' || !p.file) return;
+    seen.set(p.file, {l:p.loaded||0, t:p.total||0});
+    let l = 0, t = 0;
+    for (const v of seen.values()) { l += v.l; t += v.t; }
+    if (!t) return;
+    $('prog').value = Math.min(99, l/t*100);
+    $('loadHint').textContent =
+      `${(l/1048576).toFixed(0)} MB di ${(t/1048576).toFixed(0)} MB scaricati.`;
   };
-
   try {
-    setState('carico l\'ascolto');
     try {
       asr = await pipeline('automatic-speech-recognition', $('mAsr').value.trim(), {
-        device:'webgpu',
-        dtype:{ encoder_model:'fp32', decoder_model_merged:'q4' },
-        progress_callback:onProgress,
-      });
-    } catch (e) {
-      console.warn('WebGPU non disponibile, passo a WASM', e);
-      ui.loadNote.textContent = 'WebGPU non disponibile: uso la CPU, sarà più lento.';
-      asr = await pipeline('automatic-speech-recognition', $('mAsr').value.trim(), {
-        progress_callback:onProgress,
-      });
+        device:'webgpu', dtype:{encoder_model:'fp32', decoder_model_merged:'q4'},
+        progress_callback:onProgress });
+    } catch {
+      $('loadHint').textContent = 'Scheda grafica non disponibile, uso il processore.';
+      asr = await pipeline('automatic-speech-recognition', $('mAsr').value.trim(),
+        { progress_callback:onProgress });
     }
-
-    setState('carico la traduzione');
     mt = await pipeline('translation', $('mMt').value.trim(), { progress_callback:onProgress });
-
-    ui.prog.value = 100;
-    ui.prog.hidden = true;
-    ui.loadNote.textContent = 'Modelli pronti e salvati nel browser. I prossimi avvii sono immediati.';
-    setState('pronto');
-    ui.btnThem.disabled = false;
-    ui.btnYou.disabled = false;
+    $('prog').hidden = true;
+    $('loadHint').textContent = 'Tutto pronto e salvato nel browser.';
+    $('bThem').disabled = false;
+    $('bYou').disabled = false;
+    $('empty').innerHTML =
+      '<h2>Pronto</h2><p>Premi «Ascolta la riunione» per cominciare. ' +
+      'Se non sai come, apri le istruzioni con la «i» in alto.</p>';
   } catch (e) {
     console.error(e);
-    ui.prog.hidden = true;
-    ui.loadNote.hidden = true;
-    setState('caricamento fallito');
-    showErr('Non sono riuscito a caricare i modelli: ' + e.message +
-      '. Controlla i nomi in Impostazioni avanzate, e che la pagina sia servita via https o localhost.');
-    ui.load.disabled = false;
+    $('prog').hidden = true;
+    $('loadHint').classList.add('bad');
+    $('loadHint').textContent = 'Non si è caricato: ' + e.message +
+      ' Controlla i nomi dei modelli qui sotto, e che la pagina sia su https.';
+    $('bLoad').disabled = false;
   }
 });
 
-/* ---------------- audio capture ---------------- */
-
-const workletSrc = `
-class Tap extends AudioWorkletProcessor {
-  process(inputs){
-    const ch = inputs[0] && inputs[0][0];
-    if (ch) this.port.postMessage(new Float32Array(ch));
-    return true;
-  }
+/* ---------- audio capture ---------- */
+const worklet = URL.createObjectURL(new Blob([`
+class Tap extends AudioWorkletProcessor{
+  process(i){ const c=i[0]&&i[0][0]; if(c) this.port.postMessage(new Float32Array(c)); return true; }
 }
-registerProcessor('tap', Tap);
-`;
-const workletURL = URL.createObjectURL(new Blob([workletSrc], {type:'application/javascript'}));
+registerProcessor('tap',Tap);`], {type:'application/javascript'}));
 
 class Channel {
-  constructor(side, el, btn, startLabel){
-    this.side = side;            // 'them' | 'you'
-    this.el = el; this.btn = btn; this.startLabel = startLabel;
-    this.active = false;
-    this.buf = []; this.pre = []; this.speaking = false; this.silence = 0; this.dur = 0;
-    btn.addEventListener('click', () => this.active ? this.stop() : this.start());
+  constructor(side, btn, label){
+    this.side = side; this.btn = btn; this.label = label; this.on = false;
+    this.buf = []; this.pre = []; this.talking = false; this.sil = 0; this.dur = 0;
+    btn.addEventListener('click', () => this.on ? this.stop() : this.start());
   }
-
   async start(){
-    showErr('');
     try {
       if (this.side === 'them') {
         this.media = await navigator.mediaDevices.getDisplayMedia({
-          video:true,
-          audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false },
-        });
+          video:true, audio:{echoCancellation:false, noiseSuppression:false, autoGainControl:false} });
         if (!this.media.getAudioTracks().length) {
           this.media.getTracks().forEach(t => t.stop());
-          throw new Error('Quella scheda è stata condivisa senza audio. Riprova spuntando "Condividi anche l\'audio della scheda".');
+          throw new Error('audio');
         }
         this.media.getVideoTracks()[0].addEventListener('ended', () => this.stop());
       } else {
         this.media = await navigator.mediaDevices.getUserMedia({
-          audio:{ echoCancellation:true, noiseSuppression:true, autoGainControl:true },
-        });
+          audio:{echoCancellation:true, noiseSuppression:true, autoGainControl:true} });
       }
-
       this.ctx = new AudioContext({sampleRate:SR});
-      await this.ctx.audioWorklet.addModule(workletURL);
-      const src = this.ctx.createMediaStreamSource(this.media);
+      await this.ctx.audioWorklet.addModule(worklet);
       const tap = new AudioWorkletNode(this.ctx, 'tap');
       tap.port.onmessage = e => this.frame(e.data);
-      src.connect(tap);
-      // deliberately not connected to destination: nothing is played back, no loop
-
-      this.active = true;
-      this.el.classList.add('live');
-      this.btn.textContent = this.side === 'them' ? 'Ferma l\'ascolto della riunione' : 'Ferma il microfono';
-      this.btn.classList.add('stop');
-      ui.save.disabled = false;
+      this.ctx.createMediaStreamSource(this.media).connect(tap);
+      // never connected to the speakers: nothing is played back, so no loop
+      this.on = true;
+      this.btn.classList.add('on');
+      this.btn.lastChild.textContent = this.side === 'them' ? 'In ascolto della riunione' : 'Microfono aperto';
+      $('bSave').disabled = false;
     } catch (e) {
-      if (e.name !== 'NotAllowedError') showErr(e.message);
-      this.cleanup();
+      if (e.message === 'audio') {
+        alert('Quella scheda è stata condivisa senza audio.\n\nRiprova e, prima di confermare, attiva «Condividi anche l\'audio della scheda».');
+      } else if (e.name !== 'NotAllowedError') {
+        alert('Non sono riuscito ad aprire l\'audio: ' + e.message);
+      }
+      this.reset();
     }
   }
-
-  stop(){
-    if (this.buf.length) this.flush();
-    this.cleanup();
-  }
-
-  cleanup(){
+  stop(){ if (this.buf.length) this.flush(); this.reset(); }
+  reset(){
     try { this.media?.getTracks().forEach(t => t.stop()); } catch {}
     try { this.ctx?.close(); } catch {}
     this.media = this.ctx = null;
-    this.active = false; this.speaking = false; this.buf = []; this.pre = []; this.dur = 0;
-    this.el.classList.remove('live');
-    this.el.querySelector('.meter i').style.width = '0';
-    this.btn.textContent = this.startLabel;
-    this.btn.classList.remove('stop');
+    this.on = false; this.talking = false; this.buf = []; this.pre = []; this.dur = 0;
+    this.btn.classList.remove('on');
+    this.btn.lastChild.textContent = this.label;
   }
-
   frame(f){
-    let sum = 0;
-    for (let i = 0; i < f.length; i++) sum += f[i]*f[i];
-    const rms = Math.sqrt(sum/f.length);
-    this.el.querySelector('.meter i').style.width = Math.min(100, rms*900) + '%';
-
+    let s = 0;
+    for (let i = 0; i < f.length; i++) s += f[i]*f[i];
+    const rms = Math.sqrt(s/f.length);
     const thr = parseFloat($('thr').value) || 0.010;
     const maxSil = parseInt($('sil').value, 10) || 700;
-    const ms = (f.length / SR) * 1000;
-
+    const ms = f.length/SR*1000;
     if (rms > thr) {
-      if (!this.speaking) {          // prepend the pre-roll so we don't clip the first word
-        this.speaking = true;
-        this.buf = this.pre.slice();
-        this.dur = this.buf.length * FRAME / SR;
-      }
-      this.silence = 0;
-      this.buf.push(f); this.dur += ms/1000;
-    } else if (this.speaking) {
-      this.silence += ms;
-      this.buf.push(f); this.dur += ms/1000;
-      if (this.silence >= maxSil) this.flush();
+      if (!this.talking) { this.talking = true; this.buf = this.pre.slice(); this.dur = this.buf.length*FRAME/SR; }
+      this.sil = 0; this.buf.push(f); this.dur += ms/1000;
+    } else if (this.talking) {
+      this.sil += ms; this.buf.push(f); this.dur += ms/1000;
+      if (this.sil >= maxSil) this.flush();
     } else {
       this.pre.push(f);
-      if (this.pre.length > 40) this.pre.shift();   // ~320 ms of pre-roll
+      if (this.pre.length > 40) this.pre.shift();   // ~320 ms of run-up
     }
-
-    if (this.speaking && this.dur > 22) this.flush();   // hard cap for long monologues
+    if (this.talking && this.dur > 22) this.flush();
   }
-
   flush(){
-    const frames = this.buf;
-    this.buf = []; this.pre = []; this.speaking = false; this.silence = 0;
-    const total = frames.reduce((n,f) => n + f.length, 0);
-    if (total < SR * 0.35) return;                     // ignore blips under 350 ms
-    const audio = new Float32Array(total);
+    const fr = this.buf;
+    this.buf = []; this.pre = []; this.talking = false; this.sil = 0;
+    const n = fr.reduce((a,f) => a + f.length, 0);
+    if (n < SR*0.35) return;
+    const a = new Float32Array(n);
     let o = 0;
-    for (const f of frames) { audio.set(f, o); o += f.length; }
-    enqueue(this.side, audio);
+    for (const f of fr) { a.set(f, o); o += f.length; }
+    push(this.side, a);
   }
 }
+const chThem = new Channel('them', $('bThem'), 'Ascolta la riunione');
+const chYou  = new Channel('you',  $('bYou'),  'Ascolta il microfono');
 
-const chThem = new Channel('them', $('chThem'), ui.btnThem, 'Ascolta la scheda della riunione');
-const chYou  = new Channel('you',  $('chYou'),  ui.btnYou,  'Ascolta il microfono');
-
-/* ---------------- transcription queue ---------------- */
-
-function enqueue(side, audio){
-  const from = side === 'them' ? ui.langThem.value : ui.langYou.value;
-  const to   = side === 'them' ? ui.langYou.value  : ui.langThem.value;
-  const node = addTurn(side, from, to);
-  queue.push({side, audio, from, to, node});
-  run();
+/* ---------- pipeline ---------- */
+function push(side, audio){
+  const from = side === 'them' ? $('langThem').value : $('langYou').value;
+  const to   = side === 'them' ? $('langYou').value  : $('langThem').value;
+  queue.push({side, audio, from, to, node:bubble(side, from, to)});
+  drain();
 }
 
-async function run(){
+async function drain(){
   if (working) return;
   working = true;
   while (queue.length) {
-    const job = queue.shift();
+    const j = queue.shift();
     try {
-      const r = await asr(job.audio, {
-        language: LANGS[job.from].whisper,
-        task: 'transcribe',
-        chunk_length_s: 30,
-      });
+      const r = await asr(j.audio, { language:LANGS[j.from].w, task:'transcribe', chunk_length_s:30 });
       const text = (r.text || '').trim();
-      if (!text || /^[\s.,!?…-]*$/.test(text)) { job.node.remove(); continue; }
-      job.node.querySelector('.src').textContent = text;
-
-      const out = await mt(text, {
-        src_lang: LANGS[job.from].nllb,
-        tgt_lang: LANGS[job.to].nllb,
-      });
-      const translated = (out[0]?.translation_text || '').trim();
-      const dst = job.node.querySelector('.dst');
-      dst.textContent = translated;
-      dst.classList.remove('pending');
-
-      log.push(`[${job.node.dataset.time}] ${job.side === 'them' ? 'LORO' : 'TU'}\n  ${text}\n  → ${translated}\n`);
-
-      if (job.side === 'you' && translated) speak(translated, job.to);
+      if (!text || /^[\s.,!?…-]*$/.test(text)) { j.node.remove(); continue; }
+      j.node.querySelector('.orig').textContent = text;
+      const out = await mt(text, { src_lang:LANGS[j.from].n, tgt_lang:LANGS[j.to].n });
+      const tr = (out[0]?.translation_text || '').trim();
+      const d = j.node.querySelector('.trad');
+      d.textContent = tr; d.classList.remove('wait');
+      log.push(`[${j.node.dataset.t}] ${j.side === 'them' ? 'LORO' : 'TU'}\n  ${text}\n  → ${tr}\n`);
+      if (j.side === 'you' && tr) say(tr, j.to);
     } catch (e) {
       console.error(e);
-      const dst = job.node.querySelector('.dst');
-      dst.textContent = 'Questo passaggio non è stato elaborato.';
-      dst.classList.remove('pending');
-      showErr('Errore durante l\'elaborazione: ' + e.message);
+      const d = j.node.querySelector('.trad');
+      d.textContent = 'Non elaborato.'; d.classList.remove('wait');
     }
   }
   working = false;
 }
 
-function addTurn(side, from, to){
-  ui.stream.querySelector('.empty')?.remove();
-  const time = new Date().toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
-  const d = document.createElement('article');
-  d.className = 'turn ' + side;
-  d.dataset.time = time;
-  d.innerHTML =
-    `<div class="who"><b>${side === 'them' ? 'Loro' : 'Tu'}</b>` +
-    `<span>${LANGS[from].name} → ${LANGS[to].name}</span><span>${time}</span></div>` +
-    `<p class="src">…</p><p class="dst pending">in ascolto</p>`;
-  ui.stream.append(d);
+function bubble(side, from, to){
+  $('empty').style.display = 'none';
+  const t = new Date().toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'});
+  const d = document.createElement('div');
+  d.className = 'msg ' + side;
+  d.dataset.t = t;
+  d.innerHTML = `<p class="orig">…</p><p class="trad wait">in ascolto</p>` +
+    `<div class="stamp"><b>${LANGS[from].name} → ${LANGS[to].name}</b>${t}</div>`;
+  $('thread').append(d);
   d.scrollIntoView({block:'end', behavior:'smooth'});
   return d;
 }
 
-/* ---------------- speaking out ---------------- */
-
-async function speak(text, lang){
-  const mode = $('ttsMode').value;
+/* ---------- voice ---------- */
+async function say(text, lang){
+  const mode = $('voice').value;
   if (mode === 'off') return;
+  if (mode === 'system') return systemVoice(text, lang);
 
-  if (mode === 'native') { native(text, lang); return; }
-
-  try {
-    if (!ttsCache.has(lang)) {
-      setState('carico la voce ' + LANGS[lang].name);
-      ttsCache.set(lang, await pipeline('text-to-speech', LANGS[lang].tts));
-      setState('pronto');
-    }
-    const synth = ttsCache.get(lang);
-    const out = await synth(text);
-    playCtx ||= new AudioContext();
-    if (playCtx.state === 'suspended') await playCtx.resume();
-    const b = playCtx.createBuffer(1, out.audio.length, out.sampling_rate);
-    b.copyToChannel(out.audio instanceof Float32Array ? out.audio : Float32Array.from(out.audio), 0);
-    const s = playCtx.createBufferSource();
-    s.buffer = b;
-    s.connect(playCtx.destination);   // audible in this tab, so Zoom's tab-audio share carries it
-    s.start();
-  } catch (e) {
-    console.warn('Voce locale non disponibile, uso quella di sistema', e);
-    setState('pronto');
-    native(text, lang);
+  if (mode === 'auto' && LANGS[lang].kok) {
+    try {
+      if (!kokoro) {
+        const { KokoroTTS } = await import('https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm');
+        kokoro = await KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX',
+          { dtype:'q8', device:'webgpu' });
+      }
+      const a = await kokoro.generate(text, { voice:LANGS[lang].kok });
+      return play(a.audio, a.sampling_rate);
+    } catch (e) { console.warn('voce naturale non disponibile', e); }
   }
+  try {
+    if (!mmsCache.has(lang))
+      mmsCache.set(lang, await pipeline('text-to-speech', LANGS[lang].mms));
+    const a = await mmsCache.get(lang)(text);
+    return play(a.audio, a.sampling_rate);
+  } catch (e) { console.warn('voce base non disponibile', e); systemVoice(text, lang); }
 }
 
-function native(text, lang){
+async function play(data, rate){
+  playCtx ||= new AudioContext();
+  if (playCtx.state === 'suspended') await playCtx.resume();
+  const arr = data instanceof Float32Array ? data : Float32Array.from(data);
+  const b = playCtx.createBuffer(1, arr.length, rate);
+  b.copyToChannel(arr, 0);
+  const s = playCtx.createBufferSource();
+  s.buffer = b;
+  s.connect(playCtx.destination);   // audible here, so the shared tab carries it
+  s.start();
+}
+
+function systemVoice(text, lang){
   try {
     const u = new SpeechSynthesisUtterance(text);
     u.lang = LANGS[lang].bcp;
@@ -488,19 +546,17 @@ function native(text, lang){
   } catch (e) { console.warn(e); }
 }
 
-/* ---------------- transcript export ---------------- */
-
-ui.save.addEventListener('click', () => {
-  const blob = new Blob([log.join('\n')], {type:'text/plain;charset=utf-8'});
+/* ---------- export ---------- */
+$('bSave').addEventListener('click', () => {
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'trascrizione-' + new Date().toISOString().slice(0,16).replace(/[:T]/g,'-') + '.txt';
+  a.href = URL.createObjectURL(new Blob([log.join('\n')], {type:'text/plain;charset=utf-8'}));
+  a.download = 'conversazione-' + new Date().toISOString().slice(0,16).replace(/[:T]/g,'-') + '.txt';
   a.click();
   URL.revokeObjectURL(a.href);
 });
 
-window.addEventListener('beforeunload', e => {
-  if (chThem.active || chYou.active) { e.preventDefault(); e.returnValue = ''; }
+addEventListener('beforeunload', e => {
+  if (chThem.on || chYou.on) { e.preventDefault(); e.returnValue = ''; }
 });
 </script>
 </body>
