@@ -199,6 +199,14 @@ ol.steps em{font-style:normal;color:var(--txt);font-weight:500}
         <option value="1.6">Rapidissima</option>
       </select></div>
   </div>
+  <div class="grid one" style="margin-top:12px">
+    <div><label for="outDev">Dove esce la voce per loro</label>
+      <select id="outDev"><option value="default">Altoparlanti, via condivisione schermo</option></select></div>
+  </div>
+  <p class="hint" id="devHint">Se hai un microfono virtuale (BlackHole) sceglilo qui e impostalo
+    come microfono in Zoom: la voce tradotta entra direttamente in riunione, non serve condividere
+    lo schermo e non la senti nemmeno tu. Altrimenti lascia «Altoparlanti» e condividi questa
+    scheda con l'audio.</p>
   <button class="second" id="bTest">Prova entrambe le voci adesso</button>
   <p class="hint" id="voiceHint">La voce per loro suona dentro la pagina, così l'audio della
     scheda condivisa la trasmette. La voce per te è quella del Mac, che resta fuori dalla
@@ -217,11 +225,16 @@ ol.steps em{font-style:normal;color:var(--txt);font-weight:500}
   <h3>Regolazione fine</h3>
   <div class="grid">
     <div><label for="sil">Pausa che chiude una frase (ms)</label>
-      <input type="text" id="sil" value="350"></div>
+      <input type="text" id="sil" value="300"></div>
     <div><label for="minv">Voce minima per frase (ms)</label>
       <input type="text" id="minv" value="300"></div>
   </div>
   <div class="grid" style="margin-top:12px">
+    <div><label for="speed">Priorità</label>
+      <select id="speed">
+        <option value="fast">Massima velocità, niente bozza</option>
+        <option value="draft">Mostra la bozza mentre si parla</option>
+      </select></div>
     <div><label for="mtMode">Traduzione</label>
       <select id="mtMode">
         <option value="fast">Veloce, passa dall'inglese se serve</option>
@@ -254,7 +267,8 @@ ol.steps em{font-style:normal;color:var(--txt);font-weight:500}
       tutto salvato nel browser.</p></li>
     <li><strong>Prova le voci prima di cominciare</strong>
       <p>Premi <em>Prova entrambe le voci adesso</em>: senti una frase nella loro lingua e una
-      nella tua. Se una manca o suona sbagliata, il programma ti dice perché.</p></li>
+      nella tua. Se una manca o suona sbagliata, il programma ti dice perché. In ogni messaggio
+      trovi anche quanti secondi ci ha messo, così vedi dove si perde tempo.</p></li>
     <li><strong>Fai sentire la riunione al programma</strong>
       <p>Premi <em>Ascolta la riunione</em>. Chrome chiede cosa condividere: scegli
       <em>Scheda di Chrome</em>, seleziona la scheda della riunione e, prima di confermare,
@@ -267,11 +281,15 @@ ol.steps em{font-style:normal;color:var(--txt);font-weight:500}
       rumore della stanza: resta in silenzio. Poi, mentre parli, il testo compare già in
       grigio; appena ti fermi diventa definitivo, viene tradotto e letto.</p></li>
     <li><strong>Fai arrivare a loro la tua voce tradotta</strong>
-      <p>Dentro la riunione avvia una condivisione schermo, scegli <em>questa</em> scheda e
-      attiva anche qui <em>Condividi anche l'audio della scheda</em>. Poi, passaggio decisivo,
-      <em>mettiti in muto nella riunione</em>: il tuo microfono vero non arriva mai a Zoom,
-      quindi in muto loro ricevono soltanto la voce tradotta. Se resti acceso sentono
-      entrambe sovrapposte.</p></li>
+      <p>Ci sono due strade e devi sceglierne una. <em>Strada semplice</em>: dentro la riunione
+      avvia una condivisione schermo, scegli <em>questa</em> scheda e attiva
+      <em>Condividi anche l'audio della scheda</em>; poi mettiti in muto. Funziona senza
+      installare niente, ma occupa la condivisione e se dimentichi la spunta dell'audio loro
+      non sentono nulla. <em>Strada solida</em>: installa il microfono virtuale BlackHole
+      (nel Terminale <em>brew install blackhole-2ch</em>, poi riavvia il Mac), scegli
+      BlackHole in <em>Dove esce la voce per loro</em> qui nelle impostazioni, e imposta
+      BlackHole come microfono dentro Zoom. Così la voce tradotta entra in riunione da sola,
+      non serve condividere niente, e non la senti nemmeno tu.</p></li>
     <li><strong>Parla a frasi, con una pausa alla fine</strong>
       <p>Il programma capisce che hai finito quando ti fermi per circa mezzo secondo.
       Se ti interrompe a metà, allunga la pausa nelle impostazioni.</p></li>
@@ -376,6 +394,8 @@ bind('voice','voice','auto');
 bind('meVoice','meVoice','system');
 bind('rate','rate','1.15');
 bind('hear','hear','translated');
+bind('speed','speed','fast');
+bind('outDev','outDev','default', 'change', applySink);
 bind('mtMode','mtMode','fast');
 bind('sens','sens','4','input', v => $('sensVal').textContent = v);
 $('sensVal').textContent = $('sens').value;
@@ -498,6 +518,7 @@ $('bLoad').addEventListener('click', async () => {
     phase = 'Riscaldamento';
     $('loadHint').textContent = 'Riscaldamento: la prima frase sarebbe lenta senza.';
     await warmUp(you, them);
+    await listOutputs();
     $('prog').hidden = true;
     $('loadHint').className = 'hint good';
     $('loadHint').textContent = `Pronto. Traduzione ${a.how} in uscita, ${b.how} in entrata.`;
@@ -558,8 +579,12 @@ class Channel {
       this.btn.classList.add('on');
       this.btn.lastChild.textContent = 'Misuro il rumore…';
       $('bSave').disabled = false;
-      if (this.side === 'you')
-        note('Mettiti in muto nella riunione: è quello che impedisce loro di sentire la tua voce italiana.');
+      if (this.side === 'you') {
+        listOutputs();
+        note(sharesSpeaker()
+          ? 'Mettiti in muto in riunione E condividi questa scheda con l\'audio, altrimenti non sentono la voce tradotta.'
+          : 'Imposta il microfono di Zoom sullo stesso dispositivo di uscita che hai scelto qui.');
+      }
     } catch (e) {
       if (e.message === 'audio')
         alert('Quella scheda è stata condivisa senza audio.\n\nRiprova e, prima di confermare, attiva «Condividi anche l\'audio della scheda».');
@@ -655,13 +680,14 @@ class Channel {
 
     // live draft of what you are saying, while you are still saying it
     // a draft is skipped as soon as a pause begins, so it can never hold up the real one
-    if (this.sil === 0 && this.dur >= 1.2 && performance.now() - this.lastPartial > PARTIAL_EVERY
+    if ($('speed').value === 'draft' && this.sil === 0 && this.dur >= 1.2
+        && performance.now() - this.lastPartial > PARTIAL_EVERY
         && !asrBusy && !asrQ.length && !mtQ.length) {
       this.lastPartial = performance.now();
       partial(this, this.seq);
     }
 
-    const maxSil = parseInt($('sil').value,10) || 350;
+    const maxSil = parseInt($('sil').value,10) || 300;
     if (this.sil >= maxSil || this.dur > 22) this.flush();
   }
 
@@ -683,7 +709,7 @@ class Channel {
     this.btn.classList.remove('hot');
     const minVoice = parseInt($('minv').value,10) || 300;
     if (voiced < minVoice || peak < gate * 1.5 || a.length < SR * 0.4) { node?.remove(); return; }
-    asrQ.push({side:this.side, audio:a, from, to, node});
+    asrQ.push({side:this.side, audio:a, from, to, node, t0:performance.now()});
     drainAsr();
   }
 }
@@ -757,8 +783,8 @@ async function drainMt(){
         acc = acc ? acc + ' ' + piece : piece;
         d.textContent = acc; d.classList.remove('wait');
         j.node.scrollIntoView({block:'end', behavior:'smooth'});
-        speakQ.push({side:j.side, text:piece, lang:j.to, node:j.node});
-        drainSpeak();
+        if (j.side === 'you') { outQ.push({text:piece, lang:j.to, node:j.node, t0:j.t0}); drainOut(); }
+        else { meQ.push({text:piece, lang:j.to, node:j.node, t0:j.t0}); drainMe(); }
       }
       if (!acc) { fail(j.node); continue; }
       j.tr = acc;
@@ -768,21 +794,32 @@ async function drainMt(){
   mtLoop = false;
 }
 
-/* A single queue for both directions, so the voice for them and the voice for you can
-   never play at the same time and turn into mush. Order of arrival is preserved. */
-const speakQ = []; let speakLoop = false;
-async function drainSpeak(){
-  if (speakLoop) return; speakLoop = true;
-  while (speakQ.length) {
-    const j = speakQ.shift();
-    mark(j.node, j.side === 'you' ? await sayOut(j.text, j.lang) : await sayToMe(j.text, j.lang));
+/* Two independent queues again. They only take turns when both voices come out of the
+   same speaker; with the outgoing voice on its own device nothing has to wait. */
+const outQ = [], meQ = []; let outLoop = false, meLoop = false;
+async function drainOut(){
+  if (outLoop) return; outLoop = true;
+  while (outQ.length) {
+    const j = outQ.shift();
+    await waitTurn(); speaking = true;
+    try { mark(j.node, await sayOut(j.text, j.lang), j.t0); } finally { speaking = false; }
   }
-  speakLoop = false;
+  outLoop = false;
+}
+async function drainMe(){
+  if (meLoop) return; meLoop = true;
+  while (meQ.length) {
+    const j = meQ.shift();
+    await waitTurn(); speaking = true;
+    try { mark(j.node, await sayToMe(j.text, j.lang), j.t0); } finally { speaking = false; }
+  }
+  meLoop = false;
 }
 
-function mark(node, r){
+function mark(node, r, t0){
   const v = node.querySelector('.v');
-  v.textContent = r.ok ? r.how : r.why;
+  const ms = t0 ? ` · ${((performance.now()-t0)/1000).toFixed(1)} s` : '';
+  v.textContent = (r.ok ? r.how : r.why) + ms;
   v.classList.toggle('bad', !r.ok);
 }
 function fail(node){
@@ -831,8 +868,36 @@ async function sayOut(text, lang){
   return {ok:false, why:`nessuna voce ${L.name} disponibile: loro l'hanno solo letta`};
 }
 
+async function applySink(){
+  const id = $('outDev').value;
+  if (!playCtx || typeof playCtx.setSinkId !== 'function') return;
+  try { await playCtx.setSinkId(id === 'default' ? '' : id); }
+  catch (e) { console.warn('uscita audio', e); note('Non sono riuscito a usare quel dispositivo di uscita.', true); }
+}
+async function listOutputs(){
+  try {
+    const sel = $('outDev'), keep = sel.value;
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audiooutput');
+    sel.innerHTML = '<option value="default">Altoparlanti, via condivisione schermo</option>';
+    for (const d of devs) {
+      if (d.deviceId === 'default' || !d.deviceId) continue;
+      sel.append(new Option(d.label || 'Uscita audio', d.deviceId));
+    }
+    if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
+  } catch (e) { console.warn(e); }
+}
+navigator.mediaDevices?.addEventListener?.('devicechange', listOutputs);
+
+/* The outgoing voice only has to take turns with the incoming one when both come out of
+   the same speaker. Sent to a separate device, they are free to overlap and nothing waits. */
+const sharesSpeaker = () => $('outDev').value === 'default';
+let speaking = false;
+async function waitTurn(){
+  while (sharesSpeaker() && speaking) await new Promise(r => setTimeout(r, 30));
+}
+
 async function play(data, rate){
-  playCtx ||= new AudioContext();
+  if (!playCtx) { playCtx = new AudioContext(); await applySink(); }
   if (playCtx.state === 'suspended') await playCtx.resume();
   const arr = data instanceof Float32Array ? data : Float32Array.from(data);
   const b = playCtx.createBuffer(1, arr.length, rate);
