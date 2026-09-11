@@ -114,6 +114,13 @@ progress{width:100%;height:6px;margin-top:12px}
 .hint.bad{color:var(--danger)}
 .hint.good{color:var(--accent)}
 .scale{display:flex;justify-content:space-between;font-size:12px;color:var(--meta);margin-top:2px}
+.who{background:var(--card);border:1px solid var(--line);border-radius:8px;
+  padding:12px 14px;margin-top:14px;font-size:13.5px;line-height:1.6}
+.who dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:4px 12px}
+.who dt{color:var(--meta);white-space:nowrap}
+.who dd{margin:0}
+.who .todo{margin:10px 0 0;padding-top:10px;border-top:1px solid var(--line);color:var(--meta)}
+.who .todo b{color:var(--txt);font-weight:500}
 
 ol.steps{list-style:none;counter-reset:s;margin:18px 0 0;padding:0}
 ol.steps li{counter-increment:s;position:relative;padding:0 0 20px 42px}
@@ -199,14 +206,22 @@ ol.steps em{font-style:normal;color:var(--txt);font-weight:500}
         <option value="1.6">Rapidissima</option>
       </select></div>
   </div>
-  <div class="grid one" style="margin-top:12px">
+  <div class="grid one" style="margin-top:14px">
     <div><label for="outDev">Dove esce la voce per loro</label>
       <select id="outDev"><option value="default">Altoparlanti, via condivisione schermo</option></select></div>
   </div>
-  <p class="hint" id="devHint">Se hai un microfono virtuale (BlackHole) sceglilo qui e impostalo
-    come microfono in Zoom: la voce tradotta entra direttamente in riunione, non serve condividere
-    lo schermo e non la senti nemmeno tu. Altrimenti lascia «Altoparlanti» e condividi questa
-    scheda con l'audio.</p>
+  <p class="hint" id="devHint"><b>Questa è la scelta che risolve più problemi insieme.</b>
+    Con un microfono virtuale (BlackHole) selezionato qui e impostato come microfono dentro Zoom:
+    loro sentono solo la tua voce tradotta, tu non la senti affatto, non devi condividere lo
+    schermo, non devi metterti in muto, e sparisce l'attesa perché le due voci non si contendono
+    più l'altoparlante. Installazione: <b>brew install blackhole-2ch</b> nel Terminale, poi
+    riavvia il Mac. <b>Senza scaricare niente</b>: apri Configurazione MIDI Audio, premi + in
+    basso a sinistra, scegli «Crea dispositivo aggregato» e non spuntare nulla. Ottieni
+    un'uscita muta da selezionare qui: se Chrome cattura l'audio della scheda a monte
+    dell'uscita, loro la sentono e tu no. Va verificato con la prova voce mentre condividi.
+    Lasciando «Altoparlanti» resti sulla condivisione semplice: funziona, ma la voce la senti
+    anche tu, perché è lo stesso identico flusso audio.</p>
+  <div class="who" id="who"></div>
   <button class="second" id="bTest">Prova entrambe le voci adesso</button>
   <p class="hint" id="voiceHint">La voce per loro suona dentro la pagina, così l'audio della
     scheda condivisa la trasmette. La voce per te è quella del Mac, che resta fuori dalla
@@ -225,25 +240,28 @@ ol.steps em{font-style:normal;color:var(--txt);font-weight:500}
   <h3>Regolazione fine</h3>
   <div class="grid">
     <div><label for="sil">Pausa che chiude una frase (ms)</label>
-      <input type="text" id="sil" value="300"></div>
+      <input type="text" id="sil" value="900"></div>
     <div><label for="minv">Voce minima per frase (ms)</label>
       <input type="text" id="minv" value="300"></div>
   </div>
   <div class="grid" style="margin-top:12px">
-    <div><label for="speed">Priorità</label>
+    <div><label for="quality">Qualità</label>
+      <select id="quality">
+        <option value="fast">Veloce, qualità bassa</option>
+        <option value="balanced">Equilibrata</option>
+        <option value="best">Migliore, più lenta</option>
+      </select></div>
+    <div><label for="speed">Bozza mentre si parla</label>
       <select id="speed">
-        <option value="fast">Massima velocità, niente bozza</option>
-        <option value="draft">Mostra la bozza mentre si parla</option>
+        <option value="fast">No, è più veloce</option>
+        <option value="draft">Sì, mostrala</option>
       </select></div>
-    <div><label for="mtMode">Traduzione</label>
-      <select id="mtMode">
-        <option value="fast">Veloce, passa dall'inglese se serve</option>
-        <option value="full">Completa, più lenta ma più precisa</option>
-      </select></div>
-    <div><label for="mAsr">Modello di ascolto</label>
-      <input type="text" id="mAsr" value="onnx-community/whisper-base"></div>
   </div>
-  <div class="grid one" style="margin-top:12px">
+  <p class="hint" id="qHint"></p>
+  <input type="hidden" id="mtMode" value="full">
+  <div class="grid" style="margin-top:12px">
+    <div><label for="mAsr">Modello di ascolto</label>
+      <input type="text" id="mAsr" value="onnx-community/whisper-small"></div>
     <div><label for="mMt">Modello di traduzione completa</label>
       <input type="text" id="mMt" value="Xenova/nllb-200-distilled-600M"></div>
   </div>
@@ -395,8 +413,31 @@ bind('meVoice','meVoice','system');
 bind('rate','rate','1.15');
 bind('hear','hear','translated');
 bind('speed','speed','fast');
+
+/* Quality and speed trade off directly with local models. These three points on that
+   curve are what you actually get to choose between. */
+const PROFILES = {
+  fast:     {asr:'onnx-community/whisper-base',  mt:'fast', sil:700,  split:true,
+             why:'Ascolto piccolo e traduttori minuscoli, con passaggio dall\'inglese quando serve. Il più rapido, ma sbaglia spesso e le frasi escono legnose.'},
+  balanced: {asr:'onnx-community/whisper-small', mt:'full', sil:900,  split:true,
+             why:'Ascolto medio e traduzione diretta senza passaggi intermedi. Circa 500 MB in più da scaricare, un secondo circa in più per frase, molti meno errori.'},
+  best:     {asr:'onnx-community/whisper-small', mt:'full', sil:1100, split:false,
+             why:'Come sopra, ma traduce la frase intera in un colpo invece che periodo per periodo: il modello vede tutto il contesto e sbaglia meno. La voce parte più tardi.'},
+};
+function applyProfile(v){
+  const p = PROFILES[v] || PROFILES.balanced;
+  $('mAsr').value = p.asr;
+  $('mtMode').value = p.mt;
+  $('sil').value = String(p.sil);
+  $('qHint').textContent = p.why;
+  ready = false;
+  $('loadHint').className = 'hint';
+  $('loadHint').textContent = 'Impostazione cambiata: premi di nuovo Scarica i modelli.';
+}
+bind('quality','quality','balanced','change',applyProfile);
+applyProfile($('quality').value);
+$('loadHint').textContent = '';
 bind('outDev','outDev','default', 'change', applySink);
-bind('mtMode','mtMode','fast');
 bind('sens','sens','4','input', v => $('sensVal').textContent = v);
 $('sensVal').textContent = $('sens').value;
 const ratio = () => 9.5 - (parseInt($('sens').value,10) || 4) * 0.65;
@@ -687,7 +728,7 @@ class Channel {
       partial(this, this.seq);
     }
 
-    const maxSil = parseInt($('sil').value,10) || 300;
+    const maxSil = parseInt($('sil').value,10) || 900;
     if (this.sil >= maxSil || this.dur > 22) this.flush();
   }
 
@@ -708,7 +749,11 @@ class Channel {
     this.clear(false);
     this.btn.classList.remove('hot');
     const minVoice = parseInt($('minv').value,10) || 300;
-    if (voiced < minVoice || peak < gate * 1.5 || a.length < SR * 0.4) { node?.remove(); return; }
+    if (voiced < minVoice || peak < gate * 1.5 || a.length < SR * 0.4) {
+      if (node?.dataset.cont) { delete node.dataset.cont; node.dataset.done = String(performance.now()); }
+      else node?.remove();
+      return;
+    }
     asrQ.push({side:this.side, audio:a, from, to, node, t0:performance.now()});
     drainAsr();
   }
@@ -743,10 +788,13 @@ async function drainAsr(){
     const j = asrQ.shift();
     try {
       j.text = await runAsr(j.audio, j.from);
-      if (junk(j.text)) { j.node.remove(); continue; }
-      if (j.side === 'you' && isEcho(j.text)) { j.node.remove(); continue; }
+      const drop = () => { if (j.node.dataset.cont) { delete j.node.dataset.cont; j.node.dataset.done = String(performance.now()); } else j.node.remove(); };
+      if (junk(j.text)) { drop(); continue; }
+      if (j.side === 'you' && isEcho(j.text)) { drop(); continue; }
       const o = j.node.querySelector('.orig');
-      o.textContent = j.text; o.classList.remove('draft');
+      const prevO = j.node.dataset.cont ? (j.node.dataset.orig || '') : '';
+      j.node.dataset.orig = prevO ? prevO + ' ' + j.text : j.text;
+      o.textContent = j.node.dataset.orig; o.classList.remove('draft');
       mtQ.push(j); drainMt();
     } catch (e) { console.error(e); fail(j.node); }
   }
@@ -756,6 +804,7 @@ async function drainAsr(){
 /* Long turns are cut into sentences: each one is translated, shown and spoken while the
    next is still being translated, so the voice starts far sooner on a long sentence. */
 function sentences(t){
+  if (!(PROFILES[$('quality').value] || {}).split) return [t];
   if (t.length < 90) return [t];
   const parts = t.match(/[^.!?…]+[.!?…]+|[^.!?…]+$/g) || [t];
   const out = [];
@@ -776,20 +825,24 @@ async function drainMt(){
     try {
       const tr = await translator(j.from, j.to);
       const d = j.node.querySelector('.trad');
-      let acc = '';
+      const base = j.node.dataset.cont ? (j.node.dataset.trad || '') : '';
+      let acc = base;
       for (const part of sentences(j.text)) {
         const piece = ((await tr.fn(part)) || '').trim();
         if (!piece) continue;
         acc = acc ? acc + ' ' + piece : piece;
         d.textContent = acc; d.classList.remove('wait');
+        j.node.dataset.trad = acc;
         j.node.scrollIntoView({block:'end', behavior:'smooth'});
         if (j.side === 'you') { outQ.push({text:piece, lang:j.to, node:j.node, t0:j.t0}); drainOut(); }
         else { meQ.push({text:piece, lang:j.to, node:j.node, t0:j.t0}); drainMe(); }
       }
-      if (!acc) { fail(j.node); continue; }
+      j.node.dataset.done = String(performance.now());
+      delete j.node.dataset.cont;
+      if (acc === base) { if (!base) fail(j.node); continue; }
       j.tr = acc;
-      log.push(`[${j.node.dataset.t}] ${j.side === 'them' ? 'LORO' : 'TU'}\n  ${j.text}\n  → ${acc}\n`);
-    } catch (e) { console.error(e); fail(j.node); }
+      log.push(`[${j.node.dataset.t}] ${j.side === 'them' ? 'LORO' : 'TU'}\n  ${j.text}\n  → ${acc.slice(base.length).trim()}\n`);
+    } catch (e) { console.error(e); fail(j.node); j.node.dataset.done = String(performance.now()); }
   }
   mtLoop = false;
 }
@@ -827,8 +880,19 @@ function fail(node){
   d.textContent = 'Non elaborato.'; d.classList.remove('wait');
 }
 
+/* A pause is not a full stop. If a new fragment from the same speaker arrives soon after
+   one that did not end with terminal punctuation, it continues that message instead of
+   starting a new one, so a single spoken sentence stays a single line. */
 function bubble(side, from, to){
   $('empty').style.display = 'none';
+  const last = $('thread').lastElementChild;
+  if (last && last.classList.contains(side) && last.dataset.done &&
+      performance.now() - (+last.dataset.done) < 3500 &&
+      !/[.!?…]["')\]]*\s*$/.test(last.dataset.trad || '')) {
+    delete last.dataset.done;
+    last.dataset.cont = '1';
+    return last;
+  }
   const t = new Date().toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'});
   const d = document.createElement('div');
   d.className = 'msg ' + side;
@@ -884,6 +948,7 @@ async function listOutputs(){
       sel.append(new Option(d.label || 'Uscita audio', d.deviceId));
     }
     if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
+    if (typeof describe === 'function') describe();
   } catch (e) { console.warn(e); }
 }
 navigator.mediaDevices?.addEventListener?.('devicechange', listOutputs);
@@ -951,6 +1016,39 @@ async function sayToMe(text, lang){
   });
 }
 
+
+/* The recurring confusion in this setup is who ends up hearing what. Spell it out, live. */
+function describe(){
+  const them = LANGS[$('langThem').value].name, you = LANGS[$('langYou').value].name;
+  const shared = sharesSpeaker();
+  const outMode = $('voice').value, meMode = $('meVoice').value;
+  const devName = shared ? '' : ($('outDev').selectedOptions[0]?.textContent || 'dispositivo scelto');
+
+  const theyHear = outMode === 'off'
+    ? `nulla: leggono il testo in ${them} sullo schermo condiviso`
+    : `la tua voce tradotta in ${them}`;
+  const youHear = [
+    meMode === 'off' ? null : `la traduzione in ${you} di ciò che dicono`,
+    $('hear').value === 'both' ? 'le loro voci originali' : null,
+    (outMode !== 'off' && shared) ? `anche la tua voce in ${them}, perché esce dagli altoparlanti` : null,
+  ].filter(Boolean);
+
+  const todo = outMode === 'off'
+    ? ['Condividi questa scheda nella riunione: leggeranno il testo.']
+    : shared
+      ? ['Condividi <b>questa</b> scheda con <b>Condividi anche l\'audio della scheda</b>.',
+         'Mettiti in <b>muto</b> nella riunione.']
+      : [`Imposta <b>${devName}</b> come microfono dentro la riunione.`,
+         'Non serve né condividere lo schermo né il muto.'];
+
+  $('who').innerHTML =
+    '<dl><dt>Loro sentono</dt><dd>' + theyHear + '</dd>' +
+    '<dt>Tu senti</dt><dd>' + (youHear.length ? youHear.join('; ') : 'nulla, solo testo') + '</dd></dl>' +
+    '<p class="todo">Perché funzioni: ' + todo.join(' ') + '</p>';
+}
+for (const id of ['langThem','langYou','voice','meVoice','hear','outDev'])
+  $(id).addEventListener('change', describe);
+describe();
 
 /* ---------- test both voices ---------- */
 $('bTest').addEventListener('click', async () => {
