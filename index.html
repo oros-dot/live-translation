@@ -181,10 +181,21 @@ ol.steps em{font-style:normal;color:var(--txt);font-weight:500}
         <option value="off">Nessuna, solo testo</option>
       </select></div>
   </div>
+  <div class="grid one" style="margin-top:12px">
+    <div><label for="rate">Velocità della voce che senti tu</label>
+      <select id="rate">
+        <option value="1">Normale</option>
+        <option value="1.15">Svelta</option>
+        <option value="1.35">Molto svelta</option>
+        <option value="1.6">Rapidissima</option>
+      </select></div>
+  </div>
   <button class="second" id="bTest">Prova entrambe le voci adesso</button>
   <p class="hint" id="voiceHint">La voce per loro suona dentro la pagina, così l'audio della
     scheda condivisa la trasmette. La voce per te è quella del Mac, che resta fuori dalla
-    scheda: la senti solo tu.</p>
+    scheda: la senti solo tu. Mentre il Mac ti parla il microfono si spegne da solo, per
+    non riprendere la traduzione e rimandargliela indietro. Con le cuffie il problema non
+    esiste proprio e puoi parlare anche sopra.</p>
 
   <h3>Sensibilità del microfono</h3>
   <input type="range" id="sens" min="1" max="10" step="1" value="4">
@@ -195,7 +206,7 @@ ol.steps em{font-style:normal;color:var(--txt);font-weight:500}
   <h3>Regolazione fine</h3>
   <div class="grid">
     <div><label for="sil">Pausa che chiude una frase (ms)</label>
-      <input type="text" id="sil" value="450"></div>
+      <input type="text" id="sil" value="350"></div>
     <div><label for="minv">Voce minima per frase (ms)</label>
       <input type="text" id="minv" value="300"></div>
   </div>
@@ -283,6 +294,25 @@ const SR = 16000, FRAME = 128, FRAME_MS = FRAME/SR*1000;
 let asr = null, nllb = null, kokoro = null, kokoroDead = false, playCtx = null, ready = false;
 const mtCache = new Map(), mmsCache = new Map(), mmsDead = new Set(), log = [];
 
+/* While the Mac speaks to you, the microphone must go deaf. Chrome's echo canceller
+   only removes audio the page itself plays; macOS speech output never passes through
+   the page, so without this gate the mic hears the Italian translation, takes it for
+   you talking, and sends it back to them re-translated. */
+let micGateUntil = 0;
+const HOLD = Number.MAX_SAFE_INTEGER;
+const gateFor = ms => { micGateUntil = performance.now() + ms; };
+const recentToMe = [];              // last lines read to you, to catch any leak past the gate
+const words = t => t.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu,'').split(/\s+/).filter(Boolean);
+function isEcho(text){
+  const a = words(text);
+  if (a.length < 2) return false;
+  for (const prev of recentToMe) {
+    const set = new Set(words(prev));
+    if (a.filter(w => set.has(w)).length / a.length >= 0.6) return true;
+  }
+  return false;
+}
+
 const store = {
   get(k){ try { return localStorage.getItem(k); } catch { return null; } },
   set(k,v){ try { localStorage.setItem(k,v); } catch {} },
@@ -319,6 +349,7 @@ bind('langThem','them','fi','change', () => { ready = false; $('loadHint').textC
 bind('langYou','you','it','change',   () => { ready = false; $('loadHint').textContent = 'Lingua cambiata: premi di nuovo Scarica i modelli.'; });
 bind('voice','voice','auto');
 bind('meVoice','meVoice','system');
+bind('rate','rate','1.15');
 bind('mtMode','mtMode','fast');
 bind('sens','sens','4','input', v => $('sensVal').textContent = v);
 $('sensVal').textContent = $('sens').value;
@@ -393,6 +424,25 @@ async function prepOutVoice(lang, onP){
   }
 }
 
+/* First call on each model compiles GPU kernels and can cost seconds. Pay that here,
+   with dummy input, instead of on the first sentence of the meeting. */
+async function warmUp(you, them){
+  const quiet = new Float32Array(SR);
+  for (let i = 0; i < quiet.length; i++) quiet[i] = (Math.random()-0.5) * 1e-4;
+  try { await asr(quiet, {language:LANGS[you].w, task:'transcribe', max_new_tokens:4}); } catch {}
+  for (const [a,b] of [[you,them],[them,you]]) {
+    try { await (await translator(a,b)).fn('ok'); } catch {}
+  }
+  try {
+    if (kokoro) await kokoro.generate('ok', {voice:LANGS[them].kok});
+    else if (mmsCache.has(them)) await mmsCache.get(them)('ok');
+  } catch {}
+  try {                                   // wake the macOS speech service silently
+    const u = new SpeechSynthesisUtterance(' ');
+    u.volume = 0; speechSynthesis.speak(u);
+  } catch {}
+}
+
 $('bLoad').addEventListener('click', async () => {
   $('bLoad').disabled = true;
   $('prog').hidden = false;
@@ -418,7 +468,10 @@ $('bLoad').addEventListener('click', async () => {
     const b = await translator(them, you, onP);
     phase = 'Voce per loro';
     await prepOutVoice(them, onP);
-    allVoices();
+    await allVoices();
+    phase = 'Riscaldamento';
+    $('loadHint').textContent = 'Riscaldamento: la prima frase sarebbe lenta senza.';
+    await warmUp(you, them);
     $('prog').hidden = true;
     $('loadHint').className = 'hint good';
     $('loadHint').textContent = `Pronto. Traduzione ${a.how} in uscita, ${b.how} in entrata.`;
@@ -443,7 +496,7 @@ class Tap extends AudioWorkletProcessor{
 }
 registerProcessor('tap',Tap);`], {type:'application/javascript'}));
 
-const ONSET = 10, PREROLL = 50, ABS_FLOOR = 0.004, WARMUP = 250, PARTIAL_EVERY = 1100;
+const ONSET = 10, PREROLL = 50, ABS_FLOOR = 0.004, WARMUP = 250, PARTIAL_EVERY = 900;
 
 class Channel {
   constructor(side, btn, label){
@@ -501,6 +554,13 @@ class Channel {
   }
 
   frame(f){
+    if (this.side === 'you' && performance.now() < micGateUntil) {
+      if (this.talking) { this.node?.remove(); this.seq++; this.clear(false); this.btn.classList.remove('hot'); }
+      if (!this.gated) { this.gated = true; this.btn.lastChild.textContent = 'In pausa, stai ascoltando'; }
+      return;                       // no buffering, no noise-floor update while it speaks
+    }
+    if (this.gated) { this.gated = false; this.btn.lastChild.textContent = 'Microfono aperto'; }
+
     let e = 0, cross = 0, prevSign = 0;
     for (let i = 0; i < f.length; i++) {
       this.hp = 0.95 * (this.hp + f[i] - this.prev);     // high pass near 130 Hz
@@ -557,12 +617,14 @@ class Channel {
     else this.sil += FRAME_MS;
 
     // live draft of what you are saying, while you are still saying it
-    if (this.dur >= 1.0 && performance.now() - this.lastPartial > PARTIAL_EVERY && !asrBusy && !asrQ.length) {
+    // a draft is skipped as soon as a pause begins, so it can never hold up the real one
+    if (this.sil === 0 && this.dur >= 1.2 && performance.now() - this.lastPartial > PARTIAL_EVERY
+        && !asrBusy && !asrQ.length && !mtQ.length) {
       this.lastPartial = performance.now();
       partial(this, this.seq);
     }
 
-    const maxSil = parseInt($('sil').value,10) || 450;
+    const maxSil = parseInt($('sil').value,10) || 350;
     if (this.sil >= maxSil || this.dur > 22) this.flush();
   }
 
@@ -593,9 +655,9 @@ const chYou  = new Channel('you',  $('bYou'),  'Ascolta il microfono');
 
 /* ---------- three independent stages, so listening, translating and speaking overlap ---------- */
 let asrBusy = false;
-async function runAsr(audio, lang){
+async function runAsr(audio, lang, cap = 128){
   asrBusy = true;
-  try { return ((await asr(audio, {language:LANGS[lang].w, task:'transcribe', max_new_tokens:128})).text || '').trim(); }
+  try { return ((await asr(audio, {language:LANGS[lang].w, task:'transcribe', max_new_tokens:cap})).text || '').trim(); }
   finally { asrBusy = false; }
 }
 const junk = t => !t || /^[\s.,!?…-]*$/.test(t) || /^\[.*\]$/.test(t);
@@ -603,7 +665,7 @@ const junk = t => !t || /^[\s.,!?…-]*$/.test(t) || /^\[.*\]$/.test(t);
 async function partial(ch, seq){
   const [from] = ch.langs();
   try {
-    const text = await runAsr(ch.audio(), from);
+    const text = await runAsr(ch.audio(), from, 64);
     if (ch.seq === seq && ch.node && !junk(text)) {
       const o = ch.node.querySelector('.orig');
       o.textContent = text; o.classList.add('draft');
@@ -619,6 +681,7 @@ async function drainAsr(){
     try {
       j.text = await runAsr(j.audio, j.from);
       if (junk(j.text)) { j.node.remove(); continue; }
+      if (j.side === 'you' && isEcho(j.text)) { j.node.remove(); continue; }
       const o = j.node.querySelector('.orig');
       o.textContent = j.text; o.classList.remove('draft');
       mtQ.push(j); drainMt();
@@ -627,20 +690,42 @@ async function drainAsr(){
   asrLoop = false;
 }
 
+/* Long turns are cut into sentences: each one is translated, shown and spoken while the
+   next is still being translated, so the voice starts far sooner on a long sentence. */
+function sentences(t){
+  if (t.length < 90) return [t];
+  const parts = t.match(/[^.!?…]+[.!?…]+|[^.!?…]+$/g) || [t];
+  const out = [];
+  for (const p of parts) {
+    const s = p.trim();
+    if (!s) continue;
+    if (out.length && (out[out.length-1].length < 40 || s.length < 25)) out[out.length-1] += ' ' + s;
+    else out.push(s);
+  }
+  return out.length ? out : [t];
+}
+
 const mtQ = []; let mtLoop = false;
 async function drainMt(){
   if (mtLoop) return; mtLoop = true;
   while (mtQ.length) {
     const j = mtQ.shift();
     try {
-      j.tr = ((await (await translator(j.from, j.to)).fn(j.text)) || '').trim();
+      const tr = await translator(j.from, j.to);
       const d = j.node.querySelector('.trad');
-      d.textContent = j.tr; d.classList.remove('wait');
-      j.node.scrollIntoView({block:'end', behavior:'smooth'});
-      log.push(`[${j.node.dataset.t}] ${j.side === 'them' ? 'LORO' : 'TU'}\n  ${j.text}\n  → ${j.tr}\n`);
-      if (!j.tr) continue;
-      if (j.side === 'you') { outQ.push(j); drainOut(); }
-      else sayToMe(j.tr, j.to).then(r => mark(j.node, r));
+      let acc = '';
+      for (const part of sentences(j.text)) {
+        const piece = ((await tr.fn(part)) || '').trim();
+        if (!piece) continue;
+        acc = acc ? acc + ' ' + piece : piece;
+        d.textContent = acc; d.classList.remove('wait');
+        j.node.scrollIntoView({block:'end', behavior:'smooth'});
+        if (j.side === 'you') { outQ.push({tr:piece, to:j.to, node:j.node}); drainOut(); }
+        else { meQ.push({text:piece, lang:j.to, node:j.node}); drainMe(); }
+      }
+      if (!acc) { fail(j.node); continue; }
+      j.tr = acc;
+      log.push(`[${j.node.dataset.t}] ${j.side === 'them' ? 'LORO' : 'TU'}\n  ${j.text}\n  → ${acc}\n`);
     } catch (e) { console.error(e); fail(j.node); }
   }
   mtLoop = false;
@@ -738,10 +823,35 @@ async function sayToMe(text, lang){
   const norm = v => v.lang.toLowerCase().replace('_','-');
   const v = voices.find(x => norm(x) === want) || voices.find(x => norm(x).split('-')[0] === base);
   if (!v) return {ok:false, why:`il Mac non ha una voce ${L.name}: l'hai solo letta`};
+
+  recentToMe.push(text);
+  if (recentToMe.length > 6) recentToMe.shift();
+
   const u = new SpeechSynthesisUtterance(text);
-  u.voice = v; u.lang = v.lang; u.rate = 1.08;
-  speechSynthesis.speak(u);
-  return {ok:true, how:`letta a te, ${v.name}`};
+  u.voice = v; u.lang = v.lang;
+  u.rate = parseFloat($('rate').value) || 1.15;
+  return new Promise(res => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      gateFor(350);                       // short tail: the speakers keep ringing a moment
+      res({ok:true, how:`letta a te, ${v.name}`});
+    };
+    u.onstart = () => { micGateUntil = HOLD; };
+    u.onend = finish;
+    u.onerror = finish;
+    micGateUntil = HOLD;                  // deaf from now, in case onstart is late
+    setTimeout(finish, 1500 + text.length * 80);   // safety net if onend never fires
+    speechSynthesis.speak(u);
+  });
+}
+
+const meQ = []; let meLoop = false;
+async function drainMe(){
+  if (meLoop) return; meLoop = true;
+  while (meQ.length) { const j = meQ.shift(); mark(j.node, await sayToMe(j.text, j.lang)); }
+  meLoop = false;
 }
 
 /* ---------- test both voices ---------- */
