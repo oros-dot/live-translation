@@ -215,12 +215,12 @@ ol.steps em{font-style:normal;color:var(--txt);font-weight:500}
     loro sentono solo la tua voce tradotta, tu non la senti affatto, non devi condividere lo
     schermo, non devi metterti in muto, e sparisce l'attesa perché le due voci non si contendono
     più l'altoparlante. Installazione: <b>brew install blackhole-2ch</b> nel Terminale, poi
-    riavvia il Mac. <b>Senza scaricare niente</b>: apri Configurazione MIDI Audio, premi + in
-    basso a sinistra, scegli «Crea dispositivo aggregato» e non spuntare nulla. Ottieni
-    un'uscita muta da selezionare qui: se Chrome cattura l'audio della scheda a monte
-    dell'uscita, loro la sentono e tu no. Va verificato con la prova voce mentre condividi.
-    Lasciando «Altoparlanti» resti sulla condivisione semplice: funziona, ma la voce la senti
-    anche tu, perché è lo stesso identico flusso audio.</p>
+    riavvia il Mac. macOS non ha un'uscita muta integrata: un dispositivo aggregato senza
+    canali spuntati non viene esposto come uscita e non comparirà mai qui sotto. Lasciando
+    «Altoparlanti» resti sulla condivisione schermo: funziona, ma la voce la senti anche tu,
+    perché è lo stesso identico flusso audio che va a loro.</p>
+  <button class="second" id="bDevs">Cerca i dispositivi di uscita</button>
+  <p class="hint" id="devFound"></p>
   <div class="who" id="who"></div>
   <button class="second" id="bTest">Prova entrambe le voci adesso</button>
   <p class="hint" id="voiceHint">La voce per loro suona dentro la pagina, così l'audio della
@@ -1049,6 +1049,43 @@ function describe(){
 for (const id of ['langThem','langYou','voice','meVoice','hear','outDev'])
   $(id).addEventListener('change', describe);
 describe();
+
+/* Chrome hides output devices until audio permission is granted, and selectAudioOutput()
+   is the explicit way to ask for one. Without this the list can stay stubbornly empty. */
+$('bDevs').addEventListener('click', async () => {
+  $('bDevs').disabled = true;
+  $('devFound').className = 'hint';
+  $('devFound').textContent = 'Cerco…';
+  try {
+    try {                                  // unlock the labels
+      const s = await navigator.mediaDevices.getUserMedia({audio:true});
+      s.getTracks().forEach(t => t.stop());
+    } catch {}
+    if (navigator.mediaDevices.selectAudioOutput) {
+      try {
+        const picked = await navigator.mediaDevices.selectAudioOutput();
+        await listOutputs();
+        if (picked?.deviceId && [...$('outDev').options].some(o => o.value === picked.deviceId)) {
+          $('outDev').value = picked.deviceId;
+          store.set('outDev', picked.deviceId);
+          await applySink();
+        }
+      } catch { await listOutputs(); }
+    } else {
+      await listOutputs();
+    }
+    const found = [...$('outDev').options].slice(1).map(o => o.textContent);
+    $('devFound').className = 'hint ' + (found.length ? 'good' : 'bad');
+    $('devFound').textContent = found.length
+      ? `Uscite trovate: ${found.join(' · ')}. Se quella che cerchi non c'è, macOS non la espone come uscita audio.`
+      : 'Chrome non vede nessuna uscita oltre a quella predefinita. Un dispositivo aggregato senza canali spuntati non conta come uscita: serve un vero driver, tipo BlackHole.';
+    describe();
+  } catch (e) {
+    $('devFound').className = 'hint bad';
+    $('devFound').textContent = 'Non ci sono riuscito: ' + e.message;
+  }
+  $('bDevs').disabled = false;
+});
 
 /* ---------- test both voices ---------- */
 $('bTest').addEventListener('click', async () => {
