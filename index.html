@@ -105,6 +105,10 @@ ol li{margin-bottom:9px}ol b{color:var(--txt);font-weight:500}
     <div><label for="lThem">Loro parlano</label><select id="lThem"></select></div>
     <div><label for="lYou">Tu parli</label><select id="lYou"></select></div>
   </div>
+  <div style="margin-top:12px"><label for="vMode">La tua voce, quella che sentono loro</label><select id="vMode">
+    <option value="model">Modello nella pagina — lenta, ma la sentono di sicuro</option>
+    <option value="mac">Voce del Mac — istantanea, da verificare che la sentano</option>
+  </select></div>
   <button class="go1" id="bLoad">Scarica i modelli</button>
   <button class="go1 alt" id="bPack" hidden>Scarica le lingue per l'ascolto in locale</button>
   <progress id="pr" value="0" max="100" hidden></progress>
@@ -269,10 +273,10 @@ const JOIN = 900;    // a pause this short after a finished phrase still belongs
 const get = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const set = (k,v) => { try { localStorage.setItem(k,v); } catch {} };
 const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
-const BUILD = 'v5 · 12 set 2026';
+const BUILD = 'v6 · 12 set 2026';
 $('ver').textContent = BUILD; console.log('Live Translation ' + BUILD);
 
-let muteUntil = 0, ready = false, hasVoice = false, voiceWhy = '', seq = 0, loadTok = 0;
+let muteUntil = 0, ready = false, hasVoice = false, useMac = false, voiceWhy = '', seq = 0, loadTok = 0;
 const local = {them:false, you:false};
 const S = {them:{cur:null, heard:0, talk:false, voiceAt:0}, you:{cur:null, heard:0, talk:false, voiceAt:0}};
 const other = side => side === 'you' ? 'them' : 'you';
@@ -299,6 +303,8 @@ $('lThem').value = get('a') || 'en';
 $('lYou').value  = get('b') || 'it';
 $('lThem').onchange = e => { set('a', e.target.value); needReload(); };
 $('lYou').onchange  = e => { set('b', e.target.value); needReload(); };
+$('vMode').value = get('v') || 'model';
+$('vMode').onchange = e => { set('v', e.target.value); needReload(); };
 function needReload(){
   loadTok++; ready = false; stopAll();
   $('bThem').disabled = $('bYou').disabled = true;
@@ -401,12 +407,14 @@ async function load(){
   empty('Preparo tutto', '', false);
   status('Preparo…');
   try {
+    useMac = $('vMode').value === 'mac';
     const where = Promise.all([check(L[b][BCP]), check(L[a][BCP])]);
     const [m, v] = await Promise.all([mtw('mt', {you:b, them:a}),
-      vow('voice', {model:L[a][TTS], warm:WARM[a] || 'Ok.', hq:get('hq') === '1'})]);
+      useMac ? {voice: !!(await pickVoice(a, true))}
+             : vow('voice', {model:L[a][TTS], warm:WARM[a] || 'Ok.', hq:get('hq') === '1'})]);
     const [sb, sa] = await where;
     if (tok !== loadTok) return;
-    pickVoice(b).catch(() => {});
+    pickVoice(b, false).catch(() => {});
     local.you = sb === 'available'; local.them = sa === 'available';
     hasVoice = v.voice; voiceWhy = v.why || ''; ready = true;
     $('bPack').hidden = !(sb === 'downloadable' || sa === 'downloadable');
@@ -414,7 +422,9 @@ async function load(){
     const at = (k, on) => `${L[k][NAME].toLowerCase()} ${on ? 'in locale' : 'sui server Google'}`;
     const txt = `Riconoscimento: ${at(b, local.you)}, ${at(a, local.them)}. Traduzione ` +
       (m.where === 'scheda grafica' ? 'sulla scheda grafica.' : 'sul processore, più lenta.') +
-      (!hasVoice ? ` La tua voce non si è caricata${voiceWhy ? ' (' + voiceWhy + ')' : ''}: premi «Ricarica i modelli».`
+      (!hasVoice ? (useMac ? ` Il Mac non ha una voce ${L[a][NAME].toLowerCase()}: torna al modello nella pagina.`
+                            : ` La tua voce non si è caricata${voiceWhy ? ' (' + voiceWhy + ')' : ''}: premi «Ricarica i modelli».`)
+        : useMac ? ' La tua voce è quella del Mac: parte all\'istante, ma devi verificare che loro la sentano.'
         : ` Voce ${v.where === 'q8' ? 'compressa' : 'a qualità piena'}` +
           (v.rate >= 1.2 ? `, ${Math.round(v.rate)}× più veloce del parlato.` : ', più lenta del parlato.'));
     $('pr').hidden = true;
@@ -724,6 +734,7 @@ async function synth(text, pri){
   return buf;
 }
 function warm(bub){
+  if (useMac) return;             // nothing to build: the Mac speaks straight away
   clearTimeout(warmTm);
   warmTm = setTimeout(async () => {
     const text = trOf(bub);
@@ -751,7 +762,6 @@ function unlock(){
 addEventListener('pointerdown', unlock, true);
 addEventListener('keydown', unlock, true);
 
-const macVoice = {};
 async function listVoices(){
   let v = speechSynthesis.getVoices();
   if (!v.length) v = await new Promise(r => {
@@ -760,13 +770,14 @@ async function listVoices(){
   });
   return v;
 }
-async function pickVoice(lang){   // a voice installed on the Mac starts faster than a network one
-  if (macVoice[lang]) return macVoice[lang];
+/* net: prefer the browser's own voice. It is the one that might end up in the shared tab,
+   which is exactly what we are testing. For what only you hear, the Apple voice is better. */
+async function pickVoice(lang, net){
   const vs = await listVoices(), want = L[lang][BCP].toLowerCase(), base = want.split('-')[0];
-  const nm = v => v.lang.toLowerCase().replace('_','-');
-  for (const f of [x => nm(x) === want && x.localService, x => nm(x).split('-')[0] === base && x.localService,
+  const nm = v => v.lang.toLowerCase().replace('_','-'), mine = v => !!v.localService === !net;
+  for (const f of [x => nm(x) === want && mine(x), x => nm(x).split('-')[0] === base && mine(x),
                    x => nm(x) === want, x => nm(x).split('-')[0] === base]) {
-    const v = vs.find(f); if (v) return macVoice[lang] = v;
+    const v = vs.find(f); if (v) return v;
   }
   return null;
 }
@@ -784,10 +795,11 @@ async function say(b){
       finish(b);
       for (const c of b.chunks) await fresh(c);      // never read a stale translation
       const text = trOf(b);
-      if (text) await play(made.text === text ? made.buf : await synth(text, -1));
+      if (text) useMac ? await speakMac(text, b.to, true)
+                       : await play(made.text === text ? made.buf : await synth(text, -1));
     } else {
       const text = trOf(b);
-      if (text) await speakMac(text, b.to);
+      if (text) await speakMac(text, b.to, false);
     }
   } catch (e) { alert(e.message); }
   btn.classList.remove('go'); btn.disabled = false;
@@ -815,8 +827,8 @@ function play(buf){
     s.onended = end; s.start(); setTimeout(end, ms + 800);
   });
 }
-async function speakMac(text, lang){
-  const v = await pickVoice(lang);
+async function speakMac(text, lang, net){
+  const v = await pickVoice(lang, net);
   if (!v) throw new Error(`Il Mac non ha una voce ${L[lang][NAME]}.`);
   speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(text);
