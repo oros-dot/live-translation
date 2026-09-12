@@ -134,6 +134,9 @@ ol li{margin-bottom:9px}ol b{color:var(--txt);font-weight:500}
 <script type="text/plain" id="wsrc">
 import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5';
 env.allowLocalModels = false;
+/* isolation only allows the threads: the runtime still has to be told to take them */
+const THREADS = self.crossOriginIsolated ? Math.max(1, Math.min(8, navigator.hardwareConcurrency || 4)) : 1;
+try { env.backends.onnx.wasm.numThreads = THREADS; } catch (e) { console.warn(e); }
 
 const prog = x => {
   if (x.status !== 'progress' || !x.file) return;
@@ -165,7 +168,8 @@ async function loadVoice(model, warm, mode){
   /* compressed weights on the processor run two to three times quicker, and that is what you hear.
      The graphics card is far quicker still but a failed attempt can leave this worker unusable,
      so it is only tried when asked for. */
-  const why = [], tries = mode === 'gpu' ? [[{device:'webgpu', dtype:'fp32'}, 'sulla scheda grafica']]
+  const why = [], tries = mode === 'gpu'
+    ? [[{device:'webgpu', dtype:'fp32'}, 'sulla scheda grafica'], [{device:'webgpu', dtype:'fp16'}, 'sulla scheda grafica']]
     : mode === 'hq' ? [[{dtype:'fp32'}, 'a qualità piena']]
     : [[{dtype:'q8'}, 'compressa'], [{dtype:'fp32'}, 'a qualità piena']];
   for (const [cfg, name] of tries) {
@@ -176,14 +180,15 @@ async function loadVoice(model, warm, mode){
       await v(warm);                       // first run compiles the kernels
       const t0 = Date.now(), r = await v(warm);
       if (!alive(r.audio)) throw new Error('non produce suono');
-      return [v, name, (r.audio.length / r.sampling_rate) / Math.max(.001, (Date.now() - t0) / 1000), ''];
+      return [v, name, (r.audio.length / r.sampling_rate) / Math.max(.001, (Date.now() - t0) / 1000),
+              why.join(' · '), THREADS];
     } catch (e) {
       console.warn('voce', name, e);
       why.push(name + ': ' + String((e && e.message) || e).slice(0, 120));
       if (v) { try { await v.dispose(); } catch {} }
     }
   }
-  return [null, '', 0, why.join(' — ')];
+  return [null, '', 0, why.join(' · '), THREADS];
 }
 
 /* fp32 on the GPU or plain on the CPU. Never q8 on the GPU: the model runs but
@@ -226,9 +231,9 @@ onmessage = async ({data:m}) => {
     }));
     else if (m.type === 'voice') ok(await run(-2, async () => {
       await clear();
-      const [v, where, rate, why] = await loadVoice(m.model, m.warm, m.mode);
+      const [v, where, rate, why, threads] = await loadVoice(m.model, m.warm, m.mode);
       voice = v; if (v) pipes.push(v);
-      return {voice: !!voice, where, rate, why};
+      return {voice: !!voice, where, rate, why, threads};
     }));
     else if (m.type === 'tr') ok({text: await run(m.pri || 0, () => mt[m.dir](m.text))});
     else if (m.type === 'tts') {
@@ -267,13 +272,12 @@ const WARM = {it:'Va bene, grazie mille.', fi:'Selvä, kiitos paljon.', en:'All 
 const $ = i => document.getElementById(i);
 const SR = 16000, MS = 128/SR*1000;
 const LONG = 8000;   // same person silent this long: the next words open a new message
-const WARM_MS = 600; // text unchanged this long: build the first clause, quietly, in the background
 let PIECE = 60;      // clause size, set from the measured speed: short engine, short clauses
 const JOIN = 900;    // a pause this short after a finished phrase still belongs to the same sentence
 const get = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const set = (k,v) => { try { localStorage.setItem(k,v); } catch {} };
 const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
-const BUILD = 'v9 · 12 set 2026';
+const BUILD = 'v10 · 12 set 2026';
 let tag = self.crossOriginIsolated ? navigator.hardwareConcurrency + ' core' : '1 core';
 $('ver').textContent = BUILD + ' · ' + tag; console.log('Live Translation ' + BUILD);
 /* one thread is all the page gets until coi.js puts the two missing headers back */
@@ -437,10 +441,9 @@ async function load(){
     local.you = sb === 'available'; local.them = sa === 'available';
     hasVoice = v.voice; voiceWhy = v.why || ''; ready = true;
     if (hasVoice) {
-      tag = (/grafica/.test(v.where) ? 'gpu' : 'cpu') + ' · ' +
-        (self.crossOriginIsolated ? navigator.hardwareConcurrency + ' core' : '1 core');
+      tag = (/grafica/.test(v.where) ? 'gpu' : 'cpu') + ' · ' + (v.threads || 1) + ' thread';
       $('ver').textContent = BUILD + ' · ' + tag;
-      PIECE = Math.max(24, Math.min(90, Math.round(8.4 * v.rate)));   // first clause ≈ .6 s of work
+      PIECE = Math.max(20, Math.min(90, Math.round(7 * v.rate)));     // first clause ≈ .5 s of work
     }
     $('bPack').hidden = !(sb === 'downloadable' || sa === 'downloadable');
     set('ok', a + '|' + b);
@@ -449,7 +452,8 @@ async function load(){
       (m.where === 'scheda grafica' ? 'sulla scheda grafica.' : 'sul processore, più lenta.') +
       (!hasVoice ? ` La tua voce non si è caricata${voiceWhy ? ' (' + voiceWhy + ')' : ''}: premi «Ricarica i modelli».`
         : ` Voce ${v.where}, ` + (v.rate >= 1.5 ? `${Math.round(v.rate)}× più veloce del parlato.`
-            : `${v.rate.toFixed(1)}× il parlato: troppo lenta per una riunione.`));
+            : `${v.rate.toFixed(1)}× il parlato: troppo lenta per una riunione.`) +
+          (v.why ? ` Scheda grafica rifiutata — ${v.why}` : ''));
     $('pr').hidden = true;
     empty('Pronto', '', false);
     status((hasVoice ? 'Pronto. ' : '') + txt, hasVoice ? 'h ok' : 'h bad');
@@ -669,6 +673,7 @@ function touch(c){
   if (c.stable && !was) c.at = Date.now();
   mark(c.b);
   if (c.src && c.src !== c.trSrc) wantTr(c);
+  else if (c.b.side === 'you') warm(c);   // final without a change of text: still worth building
 }
 function drop(p){
   const c = p.c;
@@ -740,7 +745,7 @@ async function pumpTr(side){
       mark(c.b); continue;
     }
     c.tr = out; c.trSrc = src; mark(c.b);
-    if (c.src !== src) TQ[side].add(c); else if (side === 'you') warm(c.b);
+    if (c.src !== src) TQ[side].add(c); else if (side === 'you') warm(c);
   }
   TB[side] = false;
 }
@@ -748,7 +753,8 @@ async function pumpTr(side){
 /* your voice: the model cannot emit a sound before it has computed the whole clause, so the
    text is cut into clauses. The first one starts playing while the next is still being built,
    and the first one of the last message is built ahead of time, in case you pause before pressing. */
-let made = {text:'', buf:null}, making = '', warmTm = 0;
+const made = new Map();        // clause -> sound already built
+const todo = []; let busyV = false;
 const trOf = b => b.chunks.map(c => c.tr).filter(Boolean).join(' ');
 
 function pieces(text){
@@ -761,7 +767,18 @@ function pieces(text){
     last = end;
   }
   cuts.push([start, t.length]);
-  return cuts.map(([a, b]) => t.slice(a, b).trim()).filter(Boolean);   // always a slice, never rebuilt
+  const out = [];
+  for (const [a, b] of cuts) {
+    if (b - a <= PIECE * 1.5) { const one = t.slice(a, b).trim(); if (one) out.push(one); continue; }
+    let at = a;
+    while (at < b) {                       // no comma in sight: cut it on a space instead
+      let stop = Math.min(b, at + PIECE);
+      if (stop < b) { const sp = t.lastIndexOf(' ', stop); if (sp > at) stop = sp; }
+      const piece = t.slice(at, stop).trim(); if (piece) out.push(piece);
+      at = stop;
+    }
+  }
+  return out;                              // always a slice of the translation, never rebuilt
 }
 
 async function synth(text, pri){
@@ -770,17 +787,20 @@ async function synth(text, pri){
   buf.copyToChannel(r.audio, 0);
   return buf;
 }
-function warm(bub){
-  clearTimeout(warmTm);
-  warmTm = setTimeout(async () => {
-    const text = pieces(trOf(bub))[0] || '';
-    if (!hasVoice || !text || making || made.text === text) return;
-    making = text;
-    try { const buf = await synth(text, 1); if (making === text) made = {text, buf}; }
+function warm(c){
+  if (!hasVoice || !c.stable || !c.tr || c.trSrc !== c.src) return;   // final text only
+  for (const t of pieces(c.tr)) if (!made.has(t) && !todo.includes(t)) todo.push(t);
+  pumpV();
+}
+async function pumpV(){
+  if (busyV) return; busyV = true;
+  while (todo.length) {
+    const t = todo.shift();
+    if (made.has(t)) continue;
+    try { made.set(t, await synth(t, 1)); if (made.size > 40) made.delete(made.keys().next().value); }
     catch (e) { console.error(e); }
-    making = '';
-    if (pieces(trOf(bub))[0] !== made.text) warm(bub);   // it moved while this one was being built
-  }, WARM_MS);
+  }
+  busyV = false;
 }
 
 /* output: one audio device kept awake from your first click, so nothing has to start up on Leggi */
@@ -831,10 +851,11 @@ async function say(b){
       const list = pieces(trOf(b));
       if (list.length) {
         const t0 = performance.now();
-        let next = list[0] === made.text ? Promise.resolve(made.buf) : synth(list[0], -1);
+        const get1 = t => made.get(t) || synth(t, -1);
+        let next = get1(list[0]);
         for (let i = 0; i < list.length; i++) {
           const buf = await next;
-          next = i + 1 < list.length ? synth(list[i + 1], -1) : null;   // built while this one plays
+          next = i + 1 < list.length ? get1(list[i + 1]) : null;        // built while this one plays
           if (!i) $('ver').textContent = `${BUILD} · ${tag} · ${Math.round(performance.now() - t0)} ms`;
           await play(buf);
         }
