@@ -65,6 +65,8 @@ label{display:block;font-size:13px;color:var(--meta);margin-bottom:5px}
 select{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:9px 11px;width:100%}
 .g{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .go1{background:var(--accent);color:#fff;border-radius:8px;padding:10px;width:100%;margin-top:14px;font-weight:500}
+.go1.alt{background:var(--card);color:var(--txt);border:1px solid var(--line);margin-top:8px}
+.ver{position:fixed;right:11px;bottom:7px;font-size:11px;color:var(--meta);opacity:.5;pointer-events:none;z-index:4}
 progress{width:100%;height:6px;margin-top:12px}
 .h{font-size:13px;color:var(--meta);margin:8px 0 0}.h.bad{color:var(--bad)}.h.ok{color:var(--accent)}
 ol{padding-left:20px;margin:10px 0 0;font-size:14.5px;color:var(--meta)}
@@ -87,6 +89,8 @@ ol li{margin-bottom:9px}ol b{color:var(--txt);font-weight:500}
   <button class="act" id="bYou" disabled>Ascolta il microfono</button>
 </div>
 
+<div class="ver" id="ver"></div>
+
 <main>
   <div class="thread" id="th"></div>
   <div class="empty" id="empty"><h2>Pronto a partire</h2>
@@ -102,6 +106,7 @@ ol li{margin-bottom:9px}ol b{color:var(--txt);font-weight:500}
     <div><label for="lYou">Tu parli</label><select id="lYou"></select></div>
   </div>
   <button class="go1" id="bLoad">Scarica i modelli</button>
+  <button class="go1 alt" id="bPack" hidden>Scarica le lingue per l'ascolto in locale</button>
   <progress id="pr" value="0" max="100" hidden></progress>
   <p class="h" id="hint"></p>
 </div></div>
@@ -156,23 +161,27 @@ async function clear(){
 const alive = a => { let m = 0; for (let i = 0; i < a.length; i += 7) { const x = Math.abs(a[i]);
   if (!isFinite(x)) return false; if (x > m) m = x; } return m > 1e-3; };
 
-async function loadVoice(model, warm, cpuOnly){
-  const tries = [[{device:'webgpu', dtype:'fp32'}, 'scheda grafica'], [{}, 'processore']];
-  for (const [cfg, name] of (cpuOnly ? tries.slice(1) : tries)) {
+async function loadVoice(model, warm, gpu){
+  /* the processor is the path that is known to work; the graphics card is only tried when asked for,
+     because a failed attempt can leave the runtime in this worker unusable for the fallback too */
+  const tries = gpu ? [[{device:'webgpu', dtype:'fp32'}, 'scheda grafica'], [{}, 'processore']] : [[{}, 'processore']];
+  const why = [];
+  for (const [cfg, name] of tries) {
     let v = null;
     try {
       v = await pipeline('text-to-speech', model, {...cfg, progress_callback:prog});
       postMessage({type:'stage', text:'Scaldo la voce…'});
       await v(warm);                       // first run compiles the kernels
       const t0 = Date.now(), r = await v(warm);
-      if (!alive(r.audio)) throw new Error('la voce non produce suono');
-      return [v, name, (r.audio.length / r.sampling_rate) / Math.max(.001, (Date.now() - t0) / 1000)];
+      if (!alive(r.audio)) throw new Error('non produce suono');
+      return [v, name, (r.audio.length / r.sampling_rate) / Math.max(.001, (Date.now() - t0) / 1000), ''];
     } catch (e) {
       console.warn('voce', name, e);
+      why.push(name + ': ' + String((e && e.message) || e).slice(0, 120));
       if (v) { try { await v.dispose(); } catch {} }
     }
   }
-  return [null, '', 0];
+  return [null, '', 0, why.join(' — ')];
 }
 
 /* fp32 on the GPU or plain on the CPU. Never q8 on the GPU: the model runs but
@@ -215,9 +224,9 @@ onmessage = async ({data:m}) => {
     }));
     else if (m.type === 'voice') ok(await run(-2, async () => {
       await clear();
-      const [v, where, rate] = await loadVoice(m.model, m.warm, m.cpu);
+      const [v, where, rate, why] = await loadVoice(m.model, m.warm, m.gpu);
       voice = v; if (v) pipes.push(v);
-      return {voice: !!voice, where, rate};
+      return {voice: !!voice, where, rate, why};
     }));
     else if (m.type === 'tr') ok({text: await run(0, () => mt[m.dir](m.text))});
     else if (m.type === 'tts') {
@@ -262,8 +271,10 @@ const JOIN = 900;    // a pause this short after a finished phrase still belongs
 const get = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const set = (k,v) => { try { localStorage.setItem(k,v); } catch {} };
 const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+const BUILD = 'v4 · 12 set 2026';
+$('ver').textContent = BUILD; console.log('Live Translation ' + BUILD);
 
-let muteUntil = 0, ready = false, hasVoice = false, seq = 0, loadTok = 0;
+let muteUntil = 0, ready = false, hasVoice = false, voiceWhy = '', seq = 0, loadTok = 0;
 const local = {them:false, you:false};
 const S = {them:{cur:null, heard:0, talk:false, voiceAt:0}, you:{cur:null, heard:0, talk:false, voiceAt:0}};
 const other = side => side === 'you' ? 'them' : 'you';
@@ -339,17 +350,43 @@ function worker(){
 }
 const mtw = worker(), vow = worker();
 
-/* Chrome transcribes on the Mac when it has the language pack, otherwise on Google's servers */
-async function onDevice(bcp){
-  for (const quality of ['conversation', 'dictation']) {
+/* Chrome transcribes on the Mac when it has the language pack, otherwise on Google's servers.
+   Downloading a pack is a separate, deliberate act: Chrome wants a real click for it. */
+const QUAL = ['conversation', 'dictation'];
+async function check(bcp){
+  let out = 'unavailable';
+  for (const quality of QUAL) {
     let st = 'unavailable';
     try { st = await Rec.available({langs:[bcp], processLocally:true, quality}); } catch {}
-    if (st === 'available') return true;
-    if (st === 'downloadable' || st === 'downloading') {
-      try { if (await Rec.install({langs:[bcp], processLocally:true, quality})) return true; } catch {}
+    if (st === 'available') return 'available';
+    if (st === 'downloadable' || st === 'downloading') out = 'downloadable';
+  }
+  return out;
+}
+async function installPacks(){
+  const b = $('bPack');
+  b.disabled = true; b.textContent = 'Scarico le lingue…';
+  const want = [[L[$('lYou').value][BCP], 'you'], [L[$('lThem').value][BCP], 'them']];
+  for (const [bcp] of want) {
+    for (const quality of QUAL) {
+      try { if (await Rec.install({langs:[bcp], processLocally:true, quality})) break; } catch (e) { console.warn(e); }
     }
   }
-  return false;
+  let down = false;
+  for (const [bcp, side] of want) {
+    const st = await check(bcp);
+    local[side] = st === 'available';
+    if (st === 'downloadable') down = true;
+  }
+  cThem.label(); cYou.label();
+  if (cThem.on) cThem.cut();     // the open session picks up the change when it reopens
+  if (cYou.on) cYou.cut();
+  b.disabled = false; b.hidden = !down;
+  b.textContent = 'Scarica le lingue per l\'ascolto in locale';
+  const a = $('lThem').value, y = $('lYou').value;
+  status(local.you && local.them ? 'Ascolto in locale su tutte e due le lingue.' :
+    `Ascolto in locale: ${[local.you ? L[y][NAME] : '', local.them ? L[a][NAME] : ''].filter(Boolean).join(' e ') || 'nessuna lingua'}.` +
+    ' Chrome non ha un pacchetto locale per il resto.', local.you && local.them ? 'h ok' : 'h');
 }
 
 /* everything is loaded and warmed before you press anything */
@@ -366,34 +403,39 @@ async function load(){
   empty('Preparo tutto', '', false);
   status('Preparo…');
   try {
-    const where = Promise.all([onDevice(L[b][BCP]), onDevice(L[a][BCP])]);
+    const where = Promise.all([check(L[b][BCP]), check(L[a][BCP])]);
     const [m, v] = await Promise.all([mtw('mt', {you:b, them:a}),
-      vow('voice', {model:L[a][TTS], warm:WARM[a] || 'Ok.', cpu:get('cpu') === '1'})]);
-    const [lb, la] = await where;
+      vow('voice', {model:L[a][TTS], warm:WARM[a] || 'Ok.', gpu:get('gpu') === '1'})]);
+    const [sb, sa] = await where;
     if (tok !== loadTok) return;
     pickVoice(b).catch(() => {});
-    local.you = lb; local.them = la; hasVoice = v.voice; ready = true;
+    local.you = sb === 'available'; local.them = sa === 'available';
+    hasVoice = v.voice; voiceWhy = v.why || ''; ready = true;
+    $('bPack').hidden = !(sb === 'downloadable' || sa === 'downloadable');
     set('ok', a + '|' + b);
     const at = (k, on) => `${L[k][NAME].toLowerCase()} ${on ? 'in locale' : 'sui server Google'}`;
-    const txt = `Riconoscimento: ${at(b, lb)}, ${at(a, la)}. Traduzione ` +
+    const txt = `Riconoscimento: ${at(b, local.you)}, ${at(a, local.them)}. Traduzione ` +
       (m.where === 'scheda grafica' ? 'sulla scheda grafica.' : 'sul processore, più lenta.') +
-      (!hasVoice ? ' La voce per loro non è disponibile in questa lingua.'
+      (!hasVoice ? ` La tua voce non si è caricata${voiceWhy ? ' (' + voiceWhy + ')' : ''}: premi «Ricarica i modelli».`
         : ` Voce ${v.where === 'scheda grafica' ? 'sulla scheda grafica' : 'sul processore'}` +
           (v.rate >= 1.2 ? `, ${Math.round(v.rate)}× più veloce del parlato.` : ', più lenta del parlato.'));
     $('pr').hidden = true;
     empty('Pronto', '', false);
-    status('Pronto. ' + txt, 'h ok');
+    status((hasVoice ? 'Pronto. ' : '') + txt, hasVoice ? 'h ok' : 'h bad');
     $('eh').textContent = 'Premi «Ascolta la riunione». ' + txt;
     $('bThem').disabled = $('bYou').disabled = false;
+    redraw();
   } catch (e) {
     if (tok !== loadTok) return;
     console.error(e); $('pr').hidden = true;
     empty('Non si è caricato', '', true);
     status('Non si è caricato: ' + e.message, 'h bad');
-    $('bLoad').disabled = false;
   }
+  $('bLoad').disabled = false; $('bLoad').textContent = 'Ricarica i modelli';
 }
 $('bLoad').onclick = load;
+$('bPack').onclick = () => installPacks().catch(e => { console.error(e);
+  $('bPack').disabled = false; status('Le lingue non si sono scaricate: ' + e.message, 'h bad'); });
 
 /* capture */
 const wk = URL.createObjectURL(new Blob([`class T extends AudioWorkletProcessor{
@@ -560,6 +602,7 @@ function newBubble(side){
   const b = {el, side, chunks:[], seq:++seq, pending:true, closed:false, err:'', prev:S[side].cur,
              to: side === 'them' ? $('lYou').value : $('lThem').value};
   el.querySelector('.say').onclick = () => say(b);
+  el.__b = b;
   $('empty').style.display = 'none';
   $('th').append(el);
   S[side].cur = b;
@@ -616,6 +659,7 @@ let stick = true;
 main.addEventListener('scroll', () => { stick = main.scrollHeight - main.scrollTop - main.clientHeight < 140; });
 const dirty = new Set(); let queued = false;
 function mark(b){ if (!b) return; dirty.add(b); if (!queued) { queued = true; queueMicrotask(paint); } }
+function redraw(){ for (const el of $('th').children) if (el.__b) mark(el.__b); }
 function paint(){
   queued = false;
   for (const b of dirty) draw(b);
@@ -644,7 +688,7 @@ function draw(b){
     }
   }
   if (!any) t.innerHTML = '<span class="dots"><i></i><i></i><i></i></span>';
-  b.el.querySelector('.say').hidden = !b.chunks.some(c => c.tr);
+  b.el.querySelector('.say').hidden = !b.chunks.some(c => c.tr) || (b.side === 'you' && !hasVoice);
 }
 
 /* translation: always the latest text, never a backlog of stale drafts */
