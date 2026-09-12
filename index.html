@@ -40,8 +40,13 @@ main{flex:1;overflow-y:auto;padding:18px 16px 40px}
 .m.you{align-self:flex-end;background:var(--out);border-top-right-radius:2px}
 .o{font-size:13px;color:var(--meta);margin:0 0 3px;word-wrap:break-word}
 .t{font-size:17px;margin:0;word-wrap:break-word}
-.t.w{color:var(--meta);font-style:italic}
 .t.err{color:var(--bad);font-size:14px}
+.o .i,.t .i{opacity:.55}
+.dots{display:inline-flex;gap:4px;padding:6px 1px 4px}
+.dots i{width:7px;height:7px;border-radius:50%;background:var(--meta);animation:dt 1.2s infinite ease-in-out}
+.dots i:nth-child(2){animation-delay:.15s}.dots i:nth-child(3){animation-delay:.3s}
+@keyframes dt{0%,80%,100%{opacity:.25}40%{opacity:1}}
+@media(prefers-reduced-motion:reduce){.dots i{animation:none;opacity:.6}}
 .f{display:flex;align-items:center;gap:8px;margin-top:5px;font-size:11px;color:var(--meta)}
 .say{border:1px solid var(--line);border-radius:14px;padding:3px 11px 3px 8px;font-size:12px;
  display:flex;align-items:center;gap:5px;background:var(--card)}
@@ -85,7 +90,7 @@ ol li{margin-bottom:9px}ol b{color:var(--txt);font-weight:500}
 <main>
   <div class="thread" id="th"></div>
   <div class="empty" id="empty"><h2>Pronto a partire</h2>
-    <p>Apri le impostazioni, scegli le lingue e scarica i modelli.</p>
+    <p id="eh">Apri le impostazioni, scegli le lingue e scarica i modelli.</p>
     <button class="act" id="bGo">Impostazioni</button></div>
 </main>
 
@@ -96,10 +101,6 @@ ol li{margin-bottom:9px}ol b{color:var(--txt);font-weight:500}
     <div><label for="lThem">Loro parlano</label><select id="lThem"></select></div>
     <div><label for="lYou">Tu parli</label><select id="lYou"></select></div>
   </div>
-  <div style="margin-top:12px"><label for="mod">Ascolto</label><select id="mod">
-    <option value="onnx-community/whisper-base">Veloce</option>
-    <option value="onnx-community/whisper-small">Preciso, più lento</option>
-  </select></div>
   <button class="go1" id="bLoad">Scarica i modelli</button>
   <progress id="pr" value="0" max="100" hidden></progress>
   <p class="h" id="hint"></p>
@@ -110,7 +111,8 @@ ol li{margin-bottom:9px}ol b{color:var(--txt);font-weight:500}
   <h2>Come si usa</h2>
   <ol>
     <li>Apri la riunione in <b>un'altra scheda di Chrome</b>, versione web.</li>
-    <li>Impostazioni, scegli le lingue, <b>Scarica i modelli</b>. Solo la prima volta.</li>
+    <li>Impostazioni, scegli le lingue, <b>Scarica i modelli</b>. Solo la prima volta: dopo,
+      all'apertura della pagina si caricano da soli.</li>
     <li><b>Ascolta la riunione</b>: scegli la scheda della riunione e spunta
       <b>Condividi anche l'audio della scheda</b>. Da qui non senti più le loro voci originali,
       solo il testo tradotto.</li>
@@ -118,13 +120,98 @@ ol li{margin-bottom:9px}ol b{color:var(--txt);font-weight:500}
     <li>Nella riunione condividi <b>questa</b> scheda con l'audio, e <b>mettiti in muto</b>.</li>
     <li>Premi <b>Leggi</b> su un messaggio quando vuoi farlo sentire. Sui tuoi lo sentono loro,
       sui loro lo senti tu. Niente parte da solo: decidi tu.</li>
+    <li>Un messaggio resta aperto finché parla la stessa persona, anche se si ferma a respirare.
+      Se ne apre uno nuovo quando parla l'altro, dopo una pausa lunga o dopo <b>Leggi</b>.</li>
   </ol>
 </div></div>
 
-<script type="module">
+<!-- models live in workers, so a translation or a voice being prepared never freezes the live text -->
+<script type="text/plain" id="wsrc">
 import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5';
 env.allowLocalModels = false;
 
+const prog = x => {
+  if (x.status !== 'progress' || !x.file) return;
+  postMessage({type:'progress', key:(x.name || '') + '/' + x.file, loaded:x.loaded || 0, total:x.total || 0});
+};
+
+/* one job at a time: two sessions racing on the same GPU buys nothing */
+const jobs = []; let busy = false;
+const run = (pri, fn) => new Promise((res, rej) => {
+  jobs.push({pri, fn, res, rej}); jobs.sort((p, q) => p.pri - q.pri); pump();
+});
+async function pump(){
+  if (busy) return; busy = true;
+  while (jobs.length) { const j = jobs.shift(); try { j.res(await j.fn()); } catch (e) { j.rej(e); } }
+  busy = false;
+}
+
+let pipes = [], mt = null, voice = null;
+async function clear(){
+  for (const p of pipes) { try { await p.dispose(); } catch {} }
+  pipes = []; mt = null; voice = null;
+}
+
+/* fp32 on the GPU or plain on the CPU. Never q8 on the GPU: the model runs but
+   emits random tokens, which is where the gibberish in mixed alphabets came from. */
+async function loadOne(id){
+  for (const [cfg, name] of [[{device:'webgpu', dtype:'fp32'}, 'scheda grafica'], [{}, 'processore']]) {
+    try { const m = await pipeline('translation', id, {...cfg, progress_callback:prog}); pipes.push(m); return [m, name]; }
+    catch (e) {
+      if (/404|not found|could not locate|unauthorized/i.test(e.message || '')) return [null, ''];
+      console.warn(id, name, e);
+    }
+  }
+  return [null, ''];
+}
+
+/* direct pair if it exists, otherwise through English */
+async function loadMT(from, to){
+  const [d, w] = await loadOne(`Xenova/opus-mt-${from}-${to}`);
+  if (d) return [async t => (await d(t))[0].translation_text, w];
+  if (from !== 'en' && to !== 'en') {
+    const [x, wx] = await loadOne(`Xenova/opus-mt-${from}-en`);
+    const [y] = x ? await loadOne(`Xenova/opus-mt-en-${to}`) : [null];
+    if (x && y) return [async t => (await y((await x(t))[0].translation_text))[0].translation_text, wx];
+  }
+  return [null, ''];
+}
+
+onmessage = async ({data:m}) => {
+  const ok = (x, tr) => postMessage({id:m.id, ok:true, ...x}, tr || []);
+  try {
+    if (m.type === 'mt') ok(await run(-1, async () => {
+      await clear();
+      const [a, where] = await loadMT(m.you, m.them);
+      const [b] = await loadMT(m.them, m.you);
+      if (!a || !b) throw new Error('Per questa coppia di lingue non ho trovato un traduttore.');
+      postMessage({type:'stage', text:'Scaldo il traduttore…'});
+      await a('Ok.'); await b('Ok.');   // the first run compiles the GPU kernels: pay it now, not on the first sentence
+      mt = {you:a, them:b};
+      return {where};
+    }));
+    else if (m.type === 'voice') ok(await run(-1, async () => {
+      await clear();
+      try {
+        const v = await pipeline('text-to-speech', m.model, {progress_callback:prog});
+        pipes.push(v);
+        postMessage({type:'stage', text:'Scaldo la voce…'});
+        await v('Ok.');
+        voice = v;
+      } catch (e) { console.warn('voce non disponibile', e); }
+      return {voice: !!voice};
+    }));
+    else if (m.type === 'tr') ok({text: await run(0, () => mt[m.dir](m.text))});
+    else if (m.type === 'tts') {
+      const a = await run(0, () => voice(m.text));
+      const audio = new Float32Array(a.audio);
+      ok({audio, sr:a.sampling_rate}, [audio.buffer]);
+    }
+  } catch (e) { postMessage({id:m.id, ok:false, err:String((e && e.message) || e)}); }
+};
+</script>
+
+<script type="module">
 const L = {
   it:['Italiano','it','ita_Latn','Xenova/mms-tts-ita','it-IT'],
   fi:['Finlandese','fi','fin_Latn','Xenova/mms-tts-fin','fi-FI'],
@@ -143,11 +230,17 @@ const L = {
 };
 const NAME=0, ASR=1, MT=2, TTS=3, BCP=4;
 const $ = i => document.getElementById(i);
-const SR = 16000, FR = 128, MS = FR/SR*1000;
+const SR = 16000, MS = 128/SR*1000;
+const LONG = 8000;   // same person silent this long: the next words open a new message
+const JOIN = 900;    // a pause this short after a finished phrase still belongs to the same sentence
 const get = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const set = (k,v) => { try { localStorage.setItem(k,v); } catch {} };
+const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-let asr=null, voice=null, muteUntil=0;
+let muteUntil = 0, ready = false, hasVoice = false, seq = 0, loadTok = 0;
+const local = {them:false, you:false};
+const S = {them:{cur:null, heard:0, talk:false, voiceAt:0}, you:{cur:null, heard:0, talk:false, voiceAt:0}};
+const other = side => side === 'you' ? 'them' : 'you';
 
 /* theme */
 document.documentElement.dataset.theme = get('th') || 'auto';
@@ -169,87 +262,109 @@ for (const s of [$('lThem'), $('lYou')])
   for (const k in L) s.append(new Option(L[k][NAME], k));
 $('lThem').value = get('a') || 'en';
 $('lYou').value  = get('b') || 'it';
-$('mod').value   = get('m') || 'onnx-community/whisper-base';
 $('lThem').onchange = e => { set('a', e.target.value); needReload(); };
 $('lYou').onchange  = e => { set('b', e.target.value); needReload(); };
-$('mod').onchange   = e => { set('m', e.target.value); needReload(); };
 function needReload(){
-  tr.a = tr.b = null; asr = null; voice = null;
+  loadTok++; ready = false; stopAll();
   $('bThem').disabled = $('bYou').disabled = true;
-  $('bLoad').disabled = false;
-  $('hint').className = 'h'; $('hint').textContent = 'Hai cambiato impostazione: riscarica i modelli.';
+  $('bLoad').disabled = false; $('pr').hidden = true;
+  status('Hai cambiato lingua: riscarica i modelli.');
 }
 
-const tr = {a:null, b:null};
-let backend = '';
+function status(text, cls = 'h'){
+  $('hint').className = cls; $('hint').textContent = text;
+  const e = $('eh'); if (e) e.textContent = text;
+}
+function empty(title, text, withButton){
+  const e = $('empty'); e.replaceChildren();
+  const h = document.createElement('h2'); h.textContent = title;
+  const p = document.createElement('p'); p.id = 'eh'; p.textContent = text;
+  e.append(h, p);
+  if (withButton) {
+    const b = document.createElement('button'); b.className = 'act'; b.textContent = 'Impostazioni';
+    b.onclick = () => show($('sSet')); e.append(b);
+  }
+}
 
-/* fp32 on the GPU or plain on the CPU. Never q8 on the GPU: the model runs but
-   emits random tokens, which is where the gibberish in mixed alphabets came from. */
-async function loadOne(task, id, p){
-  for (const [cfg, name] of [[{device:'webgpu', dtype:'fp32'}, 'scheda grafica'], [{}, 'processore']]) {
-    try {
-      const m = await pipeline(task, id, {...cfg, progress_callback:p});
-      backend = name;
-      return m;
-    } catch (e) {
-      if (/404|not found|could not locate|unauthorized/i.test(e.message||'')) return null;
-      console.warn(id, name, e);
+/* workers: one for translation, one for the voice, so the two never wait on each other */
+const wsrc = URL.createObjectURL(new Blob([$('wsrc').textContent], {type:'text/javascript'}));
+const seen = new Map();
+function worker(){
+  const w = new Worker(wsrc, {type:'module'}), wait = new Map(); let n = 0, dead = null;
+  w.onmessage = ({data:m}) => {
+    if (m.type === 'progress') {
+      seen.set(m.key, [m.loaded, m.total]);
+      let a = 0, b = 0; for (const [l, t] of seen.values()) { a += l; b += t; }
+      if (b) { $('pr').value = Math.min(99, a/b*100); status(`${(a/1048576)|0} MB di ${(b/1048576)|0} MB`); }
+      return;
+    }
+    if (m.type === 'stage') return status(m.text);
+    const p = wait.get(m.id); if (!p) return;
+    wait.delete(m.id); m.ok ? p[0](m) : p[1](new Error(m.err));
+  };
+  w.onerror = e => {
+    dead = new Error(e.message || 'Il motore dei modelli non è partito. Controlla la connessione e ricarica la pagina.');
+    for (const p of wait.values()) p[1](dead); wait.clear();
+  };
+  return (type, data = {}) => new Promise((res, rej) => {
+    if (dead) return rej(dead);
+    const id = ++n; wait.set(id, [res, rej]); w.postMessage({id, type, ...data});
+  });
+}
+const mtw = worker(), vow = worker();
+
+/* Chrome transcribes on the Mac when it has the language pack, otherwise on Google's servers */
+async function onDevice(bcp){
+  for (const quality of ['conversation', 'dictation']) {
+    let st = 'unavailable';
+    try { st = await Rec.available({langs:[bcp], processLocally:true, quality}); } catch {}
+    if (st === 'available') return true;
+    if (st === 'downloadable' || st === 'downloading') {
+      try { if (await Rec.install({langs:[bcp], processLocally:true, quality})) return true; } catch {}
     }
   }
-  return null;
+  return false;
 }
 
-/* direct pair if it exists, otherwise through English */
-async function loadMT(from, to, p){
-  const one = (a,b) => loadOne('translation', `Xenova/opus-mt-${a}-${b}`, p);
-  const d = await one(from, to);
-  if (d) return async t => (await d(t))[0].translation_text;
-  if (from !== 'en' && to !== 'en') {
-    const x = await one(from, 'en'), y = x && await one('en', to);
-    if (x && y) return async t => (await y((await x(t))[0].translation_text))[0].translation_text;
+/* everything is loaded and warmed before you press anything */
+async function load(){
+  if (!Rec || typeof Rec.available !== 'function') {
+    const why = 'Questo browser non sa trascrivere l\'audio della riunione. Serve Chrome aggiornato.';
+    status(why, 'h bad'); empty('Serve Chrome aggiornato', why, true); return;
   }
-  return null;
-}
-
-/* models: listening + translation + one voice for their language */
-$('bLoad').onclick = async () => {
-  $('bLoad').disabled = true; $('pr').hidden = false; $('hint').className = 'h';
-  const seen = new Map();
-  const p = x => {
-    if (x.status !== 'progress' || !x.file) return;
-    seen.set(x.file, [x.loaded||0, x.total||0]);
-    let a=0, b=0; for (const [l,t] of seen.values()) { a+=l; b+=t; }
-    if (b) { $('pr').value = Math.min(99, a/b*100);
-      $('hint').textContent = `${(a/1048576)|0} MB di ${(b/1048576)|0} MB`; }
-  };
+  const tok = ++loadTok;
+  stopAll(); ready = false; seen.clear();
+  const a = $('lThem').value, b = $('lYou').value;
+  $('bThem').disabled = $('bYou').disabled = true;
+  $('bLoad').disabled = true; $('pr').hidden = false; $('pr').value = 0;
+  empty('Preparo tutto', '', false);
+  status('Preparo…');
   try {
-    const id = $('mod').value;
-    try { asr = await pipeline('automatic-speech-recognition', id,
-      {device:'webgpu', dtype:{encoder_model:'fp32', decoder_model_merged:'q4'}, progress_callback:p});
-      backend = 'scheda grafica'; }
-    catch { asr = await pipeline('automatic-speech-recognition', id, {progress_callback:p});
-      backend = 'processore'; }
-    const asrOn = backend;
-
-    tr.a = await loadMT($('lYou').value, $('lThem').value, p);
-    tr.b = await loadMT($('lThem').value, $('lYou').value, p);
-    if (!tr.a || !tr.b) throw new Error('Per questa coppia di lingue non ho trovato un traduttore.');
-
-    try { voice = await pipeline('text-to-speech', L[$('lThem').value][TTS], {progress_callback:p}); }
-    catch (e) { console.warn('voce non disponibile', e); voice = null; }
-
-    $('pr').hidden = true; $('hint').className = 'h ok';
-    $('hint').textContent = `Pronto, ascolto sul ${asrOn}.` +
-      (asrOn === 'processore' ? ' Senza scheda grafica sarà lento.' : '') +
-      (voice ? '' : ' La voce per loro non è disponibile in questa lingua.');
+    const where = Promise.all([onDevice(L[b][BCP]), onDevice(L[a][BCP])]);
+    const [m, v] = await Promise.all([mtw('mt', {you:b, them:a}), vow('voice', {model:L[a][TTS]})]);
+    const [lb, la] = await where;
+    if (tok !== loadTok) return;
+    pickVoice(b).catch(() => {});
+    local.you = lb; local.them = la; hasVoice = v.voice; ready = true;
+    set('ok', a + '|' + b);
+    const at = (k, on) => `${L[k][NAME].toLowerCase()} ${on ? 'in locale' : 'sui server Google'}`;
+    const txt = `Riconoscimento: ${at(b, lb)}, ${at(a, la)}. Traduzione ` +
+      (m.where === 'scheda grafica' ? 'sulla scheda grafica.' : 'sul processore, più lenta.') +
+      (hasVoice ? '' : ' La voce per loro non è disponibile in questa lingua.');
+    $('pr').hidden = true;
+    empty('Pronto', '', false);
+    status('Pronto. ' + txt, 'h ok');
+    $('eh').textContent = 'Premi «Ascolta la riunione». ' + txt;
     $('bThem').disabled = $('bYou').disabled = false;
-    $('empty').innerHTML = '<h2>Pronto</h2><p>Premi «Ascolta la riunione».</p>';
   } catch (e) {
-    console.error(e); $('pr').hidden = true; $('hint').className = 'h bad';
-    $('hint').textContent = 'Non si è caricato: ' + e.message;
+    if (tok !== loadTok) return;
+    console.error(e); $('pr').hidden = true;
+    empty('Non si è caricato', '', true);
+    status('Non si è caricato: ' + e.message, 'h bad');
     $('bLoad').disabled = false;
   }
-};
+}
+$('bLoad').onclick = load;
 
 /* capture */
 const wk = URL.createObjectURL(new Blob([`class T extends AudioWorkletProcessor{
@@ -258,10 +373,13 @@ registerProcessor('t',T)`], {type:'application/javascript'}));
 
 class Ch {
   constructor(side, btn, label){
-    this.s = side; this.b = btn; this.l = label; this.on = false; this.reset(1);
+    this.s = side; this.b = btn; this.l = label; this.on = false;
+    this.r = null; this.sess = 0; this.ph = new Map(); this.back = 0; this.net = false;
+    this.vad(1);
     btn.onclick = () => this.on ? this.stop() : this.start();
   }
   async start(){
+    if (!ready || this.on) return;
     try {
       if (this.s === 'them') {
         const a = {echoCancellation:false, noiseSuppression:false, autoGainControl:false};
@@ -269,38 +387,109 @@ class Ch {
         if (navigator.mediaDevices.getSupportedConstraints().suppressLocalAudioPlayback)
           a.suppressLocalAudioPlayback = true;
         this.m = await navigator.mediaDevices.getDisplayMedia({video:true, audio:a});
-        if (!this.m.getAudioTracks().length) { this.m.getTracks().forEach(t=>t.stop());
+        if (!this.m.getAudioTracks().length) { this.m.getTracks().forEach(t=>t.stop()); this.m = null;
           throw new Error('Hai condiviso la scheda senza audio. Riprova spuntando «Condividi anche l\'audio della scheda».'); }
         this.m.getVideoTracks()[0].onended = () => this.stop();
+        this.rt = this.m.getAudioTracks()[0];
       } else {
         this.m = await navigator.mediaDevices.getUserMedia(
           {audio:{echoCancellation:true, noiseSuppression:true, autoGainControl:false}});
+        this.rt = this.m.getAudioTracks()[0].clone();   // what the recogniser hears: silenced while a voice plays
       }
       this.c = new AudioContext({sampleRate:SR});
       await this.c.audioWorklet.addModule(wk);
       const t = new AudioWorkletNode(this.c, 't');
       t.port.onmessage = e => this.f(e.data);
       this.c.createMediaStreamSource(this.m).connect(t);   // never to the speakers
-      this.on = true; this.b.classList.add('on'); this.b.textContent = 'Taro il rumore…';
+      this.on = true; this.b.classList.add('on'); this.label();
+      this.listen();
     } catch (e) {
       if (e.name !== 'NotAllowedError') alert(e.message);
       this.stop();
     }
   }
+  label(){
+    if (this.on) this.b.textContent = (this.s === 'them' ? 'Riunione in ascolto' : 'Microfono aperto') +
+      (local[this.s] ? '' : ' (server Google)');
+  }
+  /* live transcription: words arrive while the sentence is still going */
+  listen(){
+    this.seal();
+    const r = new Rec(), sess = ++this.sess;
+    r.lang = L[this.s === 'them' ? $('lThem').value : $('lYou').value][BCP];
+    r.continuous = true; r.interimResults = true; r.maxAlternatives = 1;
+    if ('processLocally' in r) r.processLocally = local[this.s];
+    if ('unspokenPunctuation' in r) r.unspokenPunctuation = true;
+    r.onresult = e => { if (sess === this.sess) this.heard(e); };
+    r.onerror = e => { if (sess === this.sess) this.fail(e.error); };
+    r.onend = () => {
+      if (sess !== this.sess) return;
+      this.r = null; this.seal();
+      if (!this.on) return;
+      const quick = performance.now() - this.t0 < 1000;
+      if (this.net || quick) { const d = this.net ? this.back : 400; this.net = false;
+        setTimeout(() => { if (this.on && !this.r) this.listen(); }, d); }
+      else this.listen();                    // Chrome closes sessions on its own: reopen at once
+    };
+    this.r = r; this.t0 = performance.now();
+    try { r.start(this.rt); }
+    catch (e) { console.warn(e); this.r = null; setTimeout(() => { if (this.on && !this.r) this.listen(); }, 300); }
+  }
+  heard(e){
+    this.back = 0;
+    const now = Date.now();
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const res = e.results[i], text = ((res[0] && res[0].transcript) || '').trim();
+      let p = this.ph.get(i);
+      if (!p) { if (!text) continue; p = phrase(this.s); this.ph.set(i, p); }
+      if (p.text === text && (p.final || !res.isFinal)) continue;
+      p.text = text; if (res.isFinal) p.final = true;
+      S[this.s].heard = now;
+      touch(p.c);
+    }
+    // interim pieces Chrome folded into another result
+    for (const [i, p] of this.ph) if (i >= e.results.length && !p.final) { this.ph.delete(i); drop(p); }
+  }
+  fail(code){
+    if (code === 'no-speech' || code === 'aborted') return;
+    if (code === 'network') { this.net = true; this.back = Math.min(this.back * 2 || 250, 4000); return; }
+    if (code === 'language-not-supported' && local[this.s]) { local[this.s] = false; this.label(); return; }
+    const why = {
+      'not-allowed':'Chrome ha bloccato il riconoscimento vocale. Consenti il microfono per questa pagina e riprova.',
+      'service-not-allowed':'Chrome non permette il riconoscimento vocale su questa pagina.',
+      'audio-capture':'Non arriva audio. Controlla il microfono o la condivisione della scheda.',
+      'language-not-supported':'Chrome non riconosce questa lingua.',
+    }[code] || `Il riconoscimento vocale si è fermato (${code}).`;
+    this.stop(); alert(why);
+  }
+  cut(){ try { this.r && this.r.stop(); } catch {} }
+  seal(){
+    const ps = [...this.ph.values()]; this.ph = new Map();
+    for (const p of ps) if (!p.final) { p.final = true; touch(p.c); }
+  }
   stop(){
-    if (this.talk) this.flush();          // don't lose a sentence in progress
-    try { this.m?.getTracks().forEach(t=>t.stop()); } catch {}
-    try { this.c?.close(); } catch {}
-    this.m = this.c = null; this.on = false; this.reset(1);
+    this.on = false;
+    if (this.r) { try { this.r.stop(); } catch {} }
+    try { this.m && this.m.getTracks().forEach(t => t.stop()); } catch {}
+    try { this.rt && this.rt.stop(); } catch {}
+    try { this.c && this.c.close(); } catch {}
+    this.m = this.c = this.rt = null;
+    const sess = this.sess;
+    setTimeout(() => { if (this.sess === sess && !this.on) { this.r = null; this.seal(); } }, 1500);
+    this.vad(1); this.quiet();
     this.b.classList.remove('on'); this.b.textContent = this.l;
   }
-  reset(all){
-    this.buf=[]; this.pre=[]; this.talk=false; this.sil=0; this.dur=0;
-    this.run=0; this.vo=0; this.pk=0; this.hp=0; this.pv=0; this.node=null;
-    if (all) { this.fl=null; this.w=0; }
+  vad(all){
+    this.talk = false; this.run = 0; this.sil = 0; this.hp = 0; this.pv = 0; this.sw = 0;
+    if (all) { this.fl = null; this.w = 0; }
   }
+  quiet(){ this.talk = false; this.run = 0; this.sil = 0; S[this.s].talk = false; mark(S[this.s].cur); }
+  /* the level meter only decides when a message box appears: it shows up the instant a voice starts */
   f(d){
-    if (this.s === 'you' && performance.now() < muteUntil) { this.reset(0); return; }
+    const now = performance.now(), mute = this.s === 'you' && now < muteUntil;
+    if (this.rt && this.rt.enabled === mute) this.rt.enabled = !mute;
+    if (now - this.sw > 300) { this.sw = now; sweep(this.s); }
+    if (mute) { if (this.talk) this.quiet(); this.hp = this.pv = 0; return; }
     let e=0, z=0, ps=0;
     for (let i=0;i<d.length;i++){
       this.hp = .95*(this.hp + d[i] - this.pv); this.pv = d[i];
@@ -308,141 +497,276 @@ class Ch {
       const g = v>=0?1:-1; if (ps && g!==ps) z++; ps=g;
     }
     const rms = Math.sqrt(e/d.length), zcr = z/d.length;
-    if (this.w < 250) { this.w++;
-      this.fl = this.fl===null ? rms : this.fl*.97 + rms*.03;
-      if (this.w===250) this.b.textContent = this.s==='them' ? 'Riunione in ascolto' : 'Microfono aperto';
-      return; }
+    if (this.w < 250) { this.w++; this.fl = this.fl===null ? rms : this.fl*.97 + rms*.03; return; }
     const gate = Math.max(this.fl*6, .004);
     const V = rms > gate && zcr < .30;      // clicks, breath and hiss cross zero far more often
-    if (!this.talk){
-      if (V){ this.run++; this.pre.push(d); if (this.pre.length>60) this.pre.shift();
-        if (this.run>=10){ this.talk=true; this.buf=this.pre.slice();
-          this.dur=this.buf.length*MS/1000; this.vo=this.run*MS; this.pk=rms; this.sil=0; } }
-      else { this.run=0; this.pre.push(d); if (this.pre.length>50) this.pre.shift();
-        this.fl += (rms-this.fl)*(rms>this.fl ? .0015 : .05); }
-      return;
-    }
-    this.buf.push(d); this.dur += MS/1000;
-    if (V){ this.sil=0; this.vo+=MS; if (rms>this.pk) this.pk=rms; } else this.sil+=MS;
-    if (this.sil>=500 || this.dur>20) this.flush();
-  }
-  flush(){
-    const b=this.buf, vo=this.vo, pk=this.pk, gate=Math.max(this.fl*6,.004);
-    this.reset(0);
-    const n=b.reduce((a,f)=>a+f.length,0);
-    if (vo<280 || pk<gate*1.5 || n<SR*.4) return;
-    const a=new Float32Array(n); let o=0; for (const f of b){ a.set(f,o); o+=f.length; }
-    q.push({side:this.s, a}); run();
+    if (!this.talk) {
+      if (V) { if (++this.run >= 10) { this.talk = true; this.sil = 0; voice(this.s); } }
+      else { this.run = 0; this.fl += (rms-this.fl)*(rms>this.fl ? .0015 : .05); }
+    } else if (V) { this.sil = 0; S[this.s].voiceAt = Date.now(); }
+    else if ((this.sil += MS) >= 350) this.quiet();
   }
 }
 const cThem = new Ch('them', $('bThem'), 'Ascolta la riunione');
 const cYou  = new Ch('you',  $('bYou'),  'Ascolta il microfono');
+function stopAll(){ if (cThem.on) cThem.stop(); if (cYou.on) cYou.stop(); }
 
-/* one worker: transcribe, show at once, then translate */
-const q = []; let busy = false;
-const junk = t => !t || /^[\s.,!?…\-]*$/.test(t) || /^\[[^\]]*\]$/.test(t);
-const ended = t => /[.!?…]["')\]]*\s*$/.test(t || '');
-/* a Latin-script target that comes back full of other alphabets means the model is broken */
-const odd = (t, lang) => {
+/* messages: one per turn. A breath never opens a new one; the other person speaking does, at once */
+function bubbleFor(side){
+  const s = S[side], o = S[other(side)].cur, b = s.cur;
+  if (b && b.el.isConnected && !b.closed) {
+    if (b.pending) return b;
+    const interrupted = o && !o.pending && o.seq > b.seq;
+    if (!interrupted && Date.now() - s.heard < LONG) return b;
+  }
+  return newBubble(side);
+}
+function newBubble(side){
+  const el = document.createElement('div');
+  el.className = 'm ' + side;
+  el.innerHTML = '<p class="o"><span></span><span class="i"></span></p><p class="t"></p><div class="f">' +
+    '<button class="say" hidden><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4zm12.5 3a4 4 0 0 0-2.2-3.6v7.2A4 4 0 0 0 16.5 12z"/></svg>Leggi</button>' +
+    `<time>${new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'})}</time></div>`;
+  const b = {el, side, chunks:[], seq:++seq, pending:true, closed:false, err:'', prev:S[side].cur,
+             to: side === 'them' ? $('lYou').value : $('lThem').value};
+  el.querySelector('.say').onclick = () => say(b);
+  $('empty').style.display = 'none';
+  $('th').append(el);
+  S[side].cur = b;
+  mark(b);
+  return b;
+}
+function voice(side){ S[side].talk = true; S[side].voiceAt = Date.now(); mark(bubbleFor(side)); }
+/* a box opened by a noise that never became words goes away */
+function sweep(side){
+  const s = S[side], b = s.cur;
+  if (!b || !b.pending || s.talk || Date.now() - s.voiceAt < 1800) return;
+  b.el.remove(); s.cur = b.prev && b.prev.el.isConnected ? b.prev : null;
+  if (!$('th').children.length) $('empty').style.display = '';
+}
+
+/* phrases group into sentences; each sentence is translated as a whole and gets its own voice clip */
+function phrase(side){
+  const b = bubbleFor(side);
+  b.pending = false;
+  let c = b.chunks[b.chunks.length - 1];
+  if (!c || (c.stable && (Date.now() - c.at > JOIN || c.src.length > 240))) {
+    c = {b, phrases:[], src:'', tr:'', trSrc:'', stable:false, at:0, audio:null, audioFor:'', waiters:null};
+    b.chunks.push(c);
+  }
+  const p = {c, text:'', final:false};
+  c.phrases.push(p);
+  return p;
+}
+function touch(c){
+  const was = c.stable;
+  c.src = c.phrases.map(p => p.text).filter(Boolean).join(' ');
+  c.stable = c.phrases.every(p => p.final);
+  if (c.stable && !was) c.at = Date.now();
+  mark(c.b);
+  if (c.src && c.src !== c.trSrc) wantTr(c); else wantVoice(c);
+}
+function drop(p){
+  const c = p.c;
+  c.phrases = c.phrases.filter(x => x !== p);
+  if (c.phrases.length) return touch(c);
+  c.b.chunks = c.b.chunks.filter(x => x !== c);
+  mark(c.b);
+}
+
+/* drawing: batched once per event, never on a timer */
+const main = document.querySelector('main');
+let stick = true;
+main.addEventListener('scroll', () => { stick = main.scrollHeight - main.scrollTop - main.clientHeight < 140; });
+const dirty = new Set(); let queued = false;
+function mark(b){ if (!b) return; dirty.add(b); if (!queued) { queued = true; queueMicrotask(paint); } }
+function paint(){
+  queued = false;
+  for (const b of dirty) draw(b);
+  dirty.clear();
+  if (stick) main.scrollTop = main.scrollHeight;
+}
+function draw(b){
+  if (!b.el.isConnected) return;
+  const [os, oi] = b.el.querySelector('.o').children, t = b.el.querySelector('.t');
+  let fin = '', tmp = '';
+  for (const c of b.chunks) for (const p of c.phrases) if (p.text) {
+    if (p.final) fin += (fin ? ' ' : '') + p.text; else tmp += (tmp ? ' ' : '') + p.text;
+  }
+  os.textContent = fin; oi.textContent = (fin && tmp ? ' ' : '') + tmp;
+  t.replaceChildren();
+  let any = false;
+  if (b.err) { t.className = 't err'; t.textContent = b.err; any = true; }
+  else {
+    t.className = 't';
+    for (const c of b.chunks) {
+      if (!c.tr) continue;
+      const s = document.createElement('span');
+      if (!c.stable || c.trSrc !== c.src) s.className = 'i';   // still moving: lighter
+      s.textContent = (any ? ' ' : '') + c.tr;
+      t.append(s); any = true;
+    }
+  }
+  if (!any) t.innerHTML = '<span class="dots"><i></i><i></i><i></i></span>';
+  b.el.querySelector('.say').hidden = !b.chunks.some(c => c.tr);
+}
+
+/* translation: always the latest text, never a backlog of stale drafts */
+const odd = (t, lang) => {   // a Latin-script target full of other alphabets means the model is broken
   if (lang === 'ru') return false;
   const bad = (t.match(/[\u0400-\u04FF\u0600-\u06FF\u0900-\u097F\u0E00-\u0E7F\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF]/g) || []).length;
   return bad > 2 && bad / Math.max(t.length, 1) > 0.03;
 };
-
-async function run(){
-  if (busy) return; busy = true;
-  while (q.length){
-    const j = q.shift();
-    const from = j.side==='them' ? $('lThem').value : $('lYou').value;
-    const to   = j.side==='them' ? $('lYou').value  : $('lThem').value;
-    try {
-      const r = await asr(j.a, {language:L[from][ASR], task:'transcribe', max_new_tokens:128});
-      const text = (r.text||'').trim();
-      if (junk(text)) continue;
-      const n = box(j.side, from, to, text);           // original on screen immediately
-      const fn = j.side === 'you' ? tr.a : tr.b;
-      const tr2 = ((await fn(text)) || '').trim();
-      const p = n.querySelector('.t');
-      if (odd(tr2, to)) { n.querySelector('.t').textContent =
-          'Traduzione illeggibile: il modello non ha funzionato. Ricarica la pagina e riscarica i modelli.';
-        n.querySelector('.t').classList.add('err'); continue; }
-      n.dataset.tr = n.dataset.tr ? n.dataset.tr + ' ' + tr2 : tr2;
-      p.textContent = n.dataset.tr; p.classList.remove('w');
-      n.querySelector('.say').hidden = false;
-      n.scrollIntoView({block:'end'});
-    } catch (e) { console.error(e); }
+const TQ = {you:new Set(), them:new Set()}, TB = {you:false, them:false};
+function wantTr(c){ TQ[c.b.side].add(c); pumpTr(c.b.side); }
+async function pumpTr(side){
+  if (TB[side]) return; TB[side] = true;
+  while (TQ[side].size && ready) {
+    const list = [...TQ[side]], c = list.find(x => x.stable) || list[list.length - 1];
+    TQ[side].delete(c);
+    const src = c.src;
+    if (!src || src === c.trSrc) { wantVoice(c); continue; }
+    let out = '';
+    try { out = ((await mtw('tr', {dir:side, text:src})).text || '').trim(); }
+    catch (e) { console.error(e); flush(c); continue; }
+    if (odd(out, c.b.to)) {
+      c.b.err = 'Traduzione illeggibile: il modello non ha funzionato. Ricarica la pagina e riscarica i modelli.';
+      mark(c.b); flush(c); continue;
+    }
+    c.tr = out; c.trSrc = src; mark(c.b);
+    if (c.src !== src) TQ[side].add(c); else wantVoice(c);
   }
-  busy = false;
+  TB[side] = false;
 }
 
-/* a pause is not a full stop: a fragment right after an unfinished one joins it */
-function box(side, from, to, text){
-  $('empty').style.display = 'none';
-  const last = $('th').lastElementChild;
-  if (last && last.classList.contains(side) && Date.now() - (+last.dataset.at) < 4000 && !ended(last.dataset.tr)) {
-    last.dataset.at = Date.now();
-    last.dataset.or += ' ' + text;
-    last.querySelector('.o').textContent = last.dataset.or;
-    return last;
+/* your sentences are voiced in the background as soon as they're final: Leggi just plays */
+const VQ = new Set(); let VB = false;
+function wantVoice(c){
+  if (c.b.side !== 'you' || !hasVoice || !c.tr || !c.stable || c.trSrc !== c.src) return;
+  if (c.audio && c.audioFor === c.tr) return flush(c);
+  VQ.add(c); pumpVoice();
+}
+async function pumpVoice(){
+  if (VB) return; VB = true;
+  while (VQ.size) {
+    const c = VQ.values().next().value; VQ.delete(c);
+    const text = c.tr;
+    if (!c.stable || c.trSrc !== c.src) continue;
+    if (c.audioFor === text) { flush(c); continue; }
+    try {
+      const r = await vow('tts', {text});
+      const buf = new AudioBuffer({length:Math.max(1, r.audio.length), sampleRate:r.sr, numberOfChannels:1});
+      buf.copyToChannel(r.audio, 0);
+      c.audio = buf; c.audioFor = text;
+    } catch (e) { console.error(e); c.audioFor = ''; flush(c); continue; }
+    if (c.tr === text) flush(c); else wantVoice(c);
   }
-  const d = document.createElement('div');
-  d.className = 'm ' + side;
-  d.dataset.at = Date.now(); d.dataset.or = text; d.dataset.tr = '';
-  d.dataset.lang = to; d.dataset.side = side;
-  d.innerHTML = `<p class="o"></p><p class="t w">traduco…</p><div class="f">` +
-    `<button class="say" hidden><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4zm12.5 3a4 4 0 0 0-2.2-3.6v7.2A4 4 0 0 0 16.5 12z"/></svg>Leggi</button>` +
-    `<time>${new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'})}</time></div>`;
-  d.querySelector('.o').textContent = text;
-  d.querySelector('.say').onclick = () => say(d);
-  $('th').append(d);
-  d.scrollIntoView({block:'end'});
-  return d;
+  VB = false;
+}
+function flush(c){ const w = c.waiters; c.waiters = null; if (w) for (const f of w) f(); }
+
+/* output: one audio device kept awake from your first click, so nothing has to start up on Leggi */
+let out = null, unlocked = false;
+function outCtx(){
+  out ||= new AudioContext({latencyHint:'interactive'});
+  if (out.state !== 'running') out.resume();
+  return out;
+}
+function unlock(){
+  if (unlocked) return; unlocked = true;
+  try { outCtx(); } catch {}
+  try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch {}
+}
+addEventListener('pointerdown', unlock, true);
+addEventListener('keydown', unlock, true);
+
+const macVoice = {};
+async function listVoices(){
+  let v = speechSynthesis.getVoices();
+  if (!v.length) v = await new Promise(r => {
+    speechSynthesis.addEventListener('voiceschanged', () => r(speechSynthesis.getVoices()), {once:true});
+    setTimeout(() => r(speechSynthesis.getVoices()), 1500);
+  });
+  return v;
+}
+async function pickVoice(lang){   // a voice installed on the Mac starts faster than a network one
+  if (macVoice[lang]) return macVoice[lang];
+  const vs = await listVoices(), want = L[lang][BCP].toLowerCase(), base = want.split('-')[0];
+  const nm = v => v.lang.toLowerCase().replace('_','-');
+  for (const f of [x => nm(x) === want && x.localService, x => nm(x).split('-')[0] === base && x.localService,
+                   x => nm(x) === want, x => nm(x).split('-')[0] === base]) {
+    const v = vs.find(f); if (v) return macVoice[lang] = v;
+  }
+  return null;
 }
 
 /* nothing speaks unless you press. yours goes through the page so the shared tab carries it;
    theirs uses the Mac voice, which stays out of the share, so only you hear it */
-let voices = null;
-const listVoices = () => voices ||= new Promise(r => {
-  const v = speechSynthesis.getVoices();
-  if (v.length) return r(v);
-  speechSynthesis.onvoiceschanged = () => r(speechSynthesis.getVoices());
-  setTimeout(() => r(speechSynthesis.getVoices()), 1200);
-});
-
-async function say(n){
-  const b = n.querySelector('.say'), text = n.dataset.tr, lang = n.dataset.lang;
-  if (!text) return;
-  b.classList.add('go'); b.disabled = true;
+async function say(b){
+  const btn = b.el.querySelector('.say');
+  if (btn.disabled) return;
+  b.closed = true;   // whatever comes next goes into a new message
+  btn.classList.add('go'); btn.disabled = true;
   try {
-    if (n.dataset.side === 'you') {
-      if (!voice) throw new Error('voce non caricata');
-      const a = await voice(text);
-      const ctx = new AudioContext();
-      const buf = ctx.createBuffer(1, a.audio.length, a.sampling_rate);
-      buf.copyToChannel(a.audio instanceof Float32Array ? a.audio : Float32Array.from(a.audio), 0);
-      const s = ctx.createBufferSource(); s.buffer = buf; s.connect(ctx.destination);
-      muteUntil = performance.now() + a.audio.length/a.sampling_rate*1000 + 400;
-      await new Promise(r => { s.onended = r; s.start();
-        setTimeout(r, a.audio.length/a.sampling_rate*1000 + 600); });
-      ctx.close();
+    if (b.side === 'you') {
+      if (!hasVoice) throw new Error('La voce per loro non è disponibile in questa lingua.');
+      await finish(b);
+      for (const c of b.chunks) {
+        if (!c.src) continue;
+        const buf = await audioOf(c);
+        if (buf) await play(buf);
+      }
     } else {
-      const vs = await listVoices();
-      const want = L[lang][BCP].toLowerCase(), base = want.split('-')[0];
-      const nm = v => v.lang.toLowerCase().replace('_','-');
-      const v = vs.find(x => nm(x) === want) || vs.find(x => nm(x).split('-')[0] === base);
-      if (!v) throw new Error(`Il Mac non ha una voce ${L[lang][NAME]}.`);
-      const u = new SpeechSynthesisUtterance(text);
-      u.voice = v; u.lang = v.lang; u.rate = 1.1;
-      muteUntil = performance.now() + 1500 + text.length*80;
-      await new Promise(r => { u.onend = r; u.onerror = r;
-        speechSynthesis.speak(u); setTimeout(r, 2000 + text.length*90); });
-      muteUntil = performance.now() + 300;
+      const text = b.chunks.map(c => c.tr).filter(Boolean).join(' ');
+      if (text) await speakMac(text, b.to);
     }
   } catch (e) { alert(e.message); }
-  b.classList.remove('go'); b.disabled = false;
+  btn.classList.remove('go'); btn.disabled = false;
+}
+/* pressed while you were still finishing the sentence: close it now instead of waiting for a pause */
+async function finish(b){
+  const open = () => b.chunks.some(c => !c.stable);
+  if (!open()) return;
+  cYou.cut();
+  const t0 = performance.now();
+  while (open() && performance.now() - t0 < 1500) await new Promise(r => setTimeout(r, 30));
+  for (const c of b.chunks) if (!c.stable) { for (const p of c.phrases) p.final = true; touch(c); }
+}
+function audioOf(c){
+  const ok = () => c.tr && c.audio && c.audioFor === c.tr && c.trSrc === c.src;
+  if (ok()) return Promise.resolve(c.audio);
+  return new Promise(res => {
+    const done = () => res(ok() ? c.audio : null);
+    (c.waiters ||= []).push(done);
+    wantTr(c); wantVoice(c);
+    setTimeout(done, 12000);
+  });
+}
+function play(buf){
+  return new Promise(r => {
+    const ctx = outCtx(), s = ctx.createBufferSource(), ms = buf.duration * 1000;
+    s.buffer = buf; s.connect(ctx.destination);
+    muteUntil = Math.max(muteUntil, performance.now() + ms + 400);
+    let done = false; const end = () => { if (!done) { done = true; r(); } };
+    s.onended = end; s.start(); setTimeout(end, ms + 600);
+  });
+}
+async function speakMac(text, lang){
+  const v = await pickVoice(lang);
+  if (!v) throw new Error(`Il Mac non ha una voce ${L[lang][NAME]}.`);
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.voice = v; u.lang = v.lang; u.rate = 1.1;
+  muteUntil = performance.now() + 1500 + text.length*80;
+  await new Promise(r => { u.onend = r; u.onerror = r;
+    speechSynthesis.speak(u); setTimeout(r, 2000 + text.length*90); });
+  muteUntil = performance.now() + 300;
 }
 
 onbeforeunload = e => { if (cThem.on || cYou.on) { e.preventDefault(); e.returnValue=''; } };
+
+/* models already downloaded once for these languages: get them ready now, not when you press */
+if (get('ok') === $('lThem').value + '|' + $('lYou').value) load();
 </script>
 </body>
 </html>
