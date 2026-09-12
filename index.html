@@ -165,7 +165,7 @@ async function loadVoice(model, warm, mode){
   /* compressed weights on the processor run two to three times quicker, and that is what you hear.
      The graphics card is far quicker still but a failed attempt can leave this worker unusable,
      so it is only tried when asked for. */
-  const why = [], tries = mode === 'gpu' ? [[{device:'webgpu', dtype:'fp32'}, 'sulla scheda grafica'], [{dtype:'q8'}, 'compressa']]
+  const why = [], tries = mode === 'gpu' ? [[{device:'webgpu', dtype:'fp32'}, 'sulla scheda grafica']]
     : mode === 'hq' ? [[{dtype:'fp32'}, 'a qualità piena']]
     : [[{dtype:'q8'}, 'compressa'], [{dtype:'fp32'}, 'a qualità piena']];
   for (const [cfg, name] of tries) {
@@ -273,7 +273,7 @@ const JOIN = 900;    // a pause this short after a finished phrase still belongs
 const get = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const set = (k,v) => { try { localStorage.setItem(k,v); } catch {} };
 const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
-const BUILD = 'v7 · 12 set 2026';
+const BUILD = 'v8 · 12 set 2026';
 $('ver').textContent = BUILD; console.log('Live Translation ' + BUILD);
 
 let muteUntil = 0, ready = false, hasVoice = false, voiceWhy = '', seq = 0, loadTok = 0;
@@ -345,12 +345,28 @@ function worker(){
     dead = new Error(e.message || 'Il motore dei modelli non è partito. Controlla la connessione e ricarica la pagina.');
     for (const p of wait.values()) p[1](dead); wait.clear();
   };
-  return (type, data = {}) => new Promise((res, rej) => {
+  const call = (type, data = {}) => new Promise((res, rej) => {
     if (dead) return rej(dead);
     const id = ++n; wait.set(id, [res, rej]); w.postMessage({id, type, ...data});
   });
+  call.kill = () => { try { w.terminate(); } catch {} };
+  return call;
 }
-const mtw = worker(), vow = worker();
+const mtw = worker(); let vow = worker();
+
+/* the graphics card is hundreds of times quicker than one WASM thread, and one thread is all
+   GitHub Pages allows: it sends no COOP/COEP, so the runtime gets no SharedArrayBuffer.
+   If the card refuses the model, that worker is thrown away and a fresh one takes the processor. */
+async function loadVoiceFor(a){
+  const pref = get('voce') || '', ask = mode => vow('voice',
+    {model:L[a][TTS], warm:WARM[a] || 'Ok.', mode}).catch(e => ({voice:false, why:String(e.message || e)}));
+  if (pref) return ask(pref);
+  const gpu = await ask('gpu');
+  if (gpu.voice) return gpu;
+  vow.kill(); vow = worker();
+  const cpu = await ask('cpu');
+  return cpu.voice ? cpu : {voice:false, why:[gpu.why, cpu.why].filter(Boolean).join(' · ')};
+}
 
 /* Chrome transcribes on the Mac when it has the language pack, otherwise on Google's servers.
    Downloading a pack is a separate, deliberate act: Chrome wants a real click for it. */
@@ -406,8 +422,8 @@ async function load(){
   status('Preparo…');
   try {
     const where = Promise.all([check(L[b][BCP]), check(L[a][BCP])]);
-    const [m, v] = await Promise.all([mtw('mt', {you:b, them:a}),
-      vow('voice', {model:L[a][TTS], warm:WARM[a] || 'Ok.', mode:get('voce') || ''})]);
+    const [m, v] = await Promise.all([mtw('mt', {you:b, them:a}), loadVoiceFor(a)]);
+    console.log(`isolata: ${self.crossOriginIsolated} · core: ${navigator.hardwareConcurrency} · webgpu: ${!!navigator.gpu}`);
     const [sb, sa] = await where;
     if (tok !== loadTok) return;
     pickVoice(b).catch(() => {});
@@ -419,8 +435,8 @@ async function load(){
     const txt = `Riconoscimento: ${at(b, local.you)}, ${at(a, local.them)}. Traduzione ` +
       (m.where === 'scheda grafica' ? 'sulla scheda grafica.' : 'sul processore, più lenta.') +
       (!hasVoice ? ` La tua voce non si è caricata${voiceWhy ? ' (' + voiceWhy + ')' : ''}: premi «Ricarica i modelli».`
-        : ` Voce ${v.where}` +
-          (v.rate >= 1.2 ? `, ${Math.round(v.rate)}× più veloce del parlato.` : ', più lenta del parlato.'));
+        : ` Voce ${v.where}, ` + (v.rate >= 1.5 ? `${Math.round(v.rate)}× più veloce del parlato.`
+            : `${v.rate.toFixed(1)}× il parlato: troppo lenta per una riunione.`));
     $('pr').hidden = true;
     empty('Pronto', '', false);
     status((hasVoice ? 'Pronto. ' : '') + txt, hasVoice ? 'h ok' : 'h bad');
