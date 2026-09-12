@@ -161,15 +161,14 @@ async function clear(){
 const alive = a => { let m = 0; for (let i = 0; i < a.length; i += 7) { const x = Math.abs(a[i]);
   if (!isFinite(x)) return false; if (x > m) m = x; } return m > 1e-3; };
 
-async function loadVoice(model, warm, gpu){
-  /* the processor is the path that is known to work; the graphics card is only tried when asked for,
-     because a failed attempt can leave the runtime in this worker unusable for the fallback too */
-  const tries = gpu ? [[{device:'webgpu', dtype:'fp32'}, 'scheda grafica'], [{}, 'processore']] : [[{}, 'processore']];
+async function loadVoice(model, warm, hq){
+  /* the processor only: the graphics card attempt could leave this worker unable to fall back.
+     The compressed weights run two to three times quicker and that is what you hear. */
   const why = [];
-  for (const [cfg, name] of tries) {
+  for (const name of (hq ? ['fp32'] : ['q8', 'fp32'])) {
     let v = null;
     try {
-      v = await pipeline('text-to-speech', model, {...cfg, progress_callback:prog});
+      v = await pipeline('text-to-speech', model, {dtype:name, progress_callback:prog});
       postMessage({type:'stage', text:'Scaldo la voce…'});
       await v(warm);                       // first run compiles the kernels
       const t0 = Date.now(), r = await v(warm);
@@ -224,11 +223,11 @@ onmessage = async ({data:m}) => {
     }));
     else if (m.type === 'voice') ok(await run(-2, async () => {
       await clear();
-      const [v, where, rate, why] = await loadVoice(m.model, m.warm, m.gpu);
+      const [v, where, rate, why] = await loadVoice(m.model, m.warm, m.hq);
       voice = v; if (v) pipes.push(v);
       return {voice: !!voice, where, rate, why};
     }));
-    else if (m.type === 'tr') ok({text: await run(0, () => mt[m.dir](m.text))});
+    else if (m.type === 'tr') ok({text: await run(m.pri || 0, () => mt[m.dir](m.text))});
     else if (m.type === 'tts') {
       const a = await run(m.pri || 0, () => voice(m.text));
       const audio = new Float32Array(a.audio);
@@ -265,13 +264,12 @@ const WARM = {it:'Va bene, grazie mille.', fi:'Selvä, kiitos paljon.', en:'All 
 const $ = i => document.getElementById(i);
 const SR = 16000, MS = 128/SR*1000;
 const LONG = 8000;   // same person silent this long: the next words open a new message
-const SETTLE = 280;  // text unchanged this long: good enough to start making the voice
-const SEG = 70;      // voice is made in pieces this size, so the first one plays while the rest is built
+const WARM_MS = 600; // text unchanged this long: build the voice once, quietly, in the background
 const JOIN = 900;    // a pause this short after a finished phrase still belongs to the same sentence
 const get = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const set = (k,v) => { try { localStorage.setItem(k,v); } catch {} };
 const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
-const BUILD = 'v4 · 12 set 2026';
+const BUILD = 'v5 · 12 set 2026';
 $('ver').textContent = BUILD; console.log('Live Translation ' + BUILD);
 
 let muteUntil = 0, ready = false, hasVoice = false, voiceWhy = '', seq = 0, loadTok = 0;
@@ -405,7 +403,7 @@ async function load(){
   try {
     const where = Promise.all([check(L[b][BCP]), check(L[a][BCP])]);
     const [m, v] = await Promise.all([mtw('mt', {you:b, them:a}),
-      vow('voice', {model:L[a][TTS], warm:WARM[a] || 'Ok.', gpu:get('gpu') === '1'})]);
+      vow('voice', {model:L[a][TTS], warm:WARM[a] || 'Ok.', hq:get('hq') === '1'})]);
     const [sb, sa] = await where;
     if (tok !== loadTok) return;
     pickVoice(b).catch(() => {});
@@ -417,7 +415,7 @@ async function load(){
     const txt = `Riconoscimento: ${at(b, local.you)}, ${at(a, local.them)}. Traduzione ` +
       (m.where === 'scheda grafica' ? 'sulla scheda grafica.' : 'sul processore, più lenta.') +
       (!hasVoice ? ` La tua voce non si è caricata${voiceWhy ? ' (' + voiceWhy + ')' : ''}: premi «Ricarica i modelli».`
-        : ` Voce ${v.where === 'scheda grafica' ? 'sulla scheda grafica' : 'sul processore'}` +
+        : ` Voce ${v.where === 'q8' ? 'compressa' : 'a qualità piena'}` +
           (v.rate >= 1.2 ? `, ${Math.round(v.rate)}× più veloce del parlato.` : ', più lenta del parlato.'));
     $('pr').hidden = true;
     empty('Pronto', '', false);
@@ -624,7 +622,7 @@ function phrase(side){
   b.pending = false;
   let c = b.chunks[b.chunks.length - 1];
   if (!c || (c.stable && (Date.now() - c.at > JOIN || c.src.length > 240))) {
-    c = {b, phrases:[], src:'', tr:'', trSrc:'', stable:false, settled:false, at:0, tm:0};
+    c = {b, phrases:[], src:'', tr:'', trSrc:'', stable:false, at:0};
     b.chunks.push(c);
   }
   const p = {c, text:'', final:false};
@@ -632,18 +630,12 @@ function phrase(side){
   return p;
 }
 function touch(c){
-  const was = c.stable, src = c.phrases.map(p => p.text).filter(Boolean).join(' ');
-  const moved = src !== c.src;
-  c.src = src;
+  const was = c.stable;
+  c.src = c.phrases.map(p => p.text).filter(Boolean).join(' ');
   c.stable = c.phrases.every(p => p.final);
   if (c.stable && !was) c.at = Date.now();
-  /* Chrome marks a sentence final long after you stop saying it: a text that stops
-     moving is already good enough to start building the voice on */
-  if (moved) { c.settled = false; clearTimeout(c.tm);
-    c.tm = setTimeout(() => { c.settled = true; wantTr(c); wantVoice(c); }, SETTLE); }
-  if (c.stable) { c.settled = true; clearTimeout(c.tm); }
   mark(c.b);
-  if (c.src && c.src !== c.trSrc) wantTr(c); else wantVoice(c);
+  if (c.src && c.src !== c.trSrc) wantTr(c);
 }
 function drop(p){
   const c = p.c;
@@ -683,6 +675,7 @@ function draw(b){
       if (!c.tr) continue;
       const s = document.createElement('span');
       if (!c.stable || c.trSrc !== c.src) s.className = 'i';   // still moving: lighter
+
       s.textContent = (any ? ' ' : '') + c.tr;
       t.append(s); any = true;
     }
@@ -702,94 +695,45 @@ function wantTr(c){ TQ[c.b.side].add(c); pumpTr(c.b.side); }
 async function pumpTr(side){
   if (TB[side]) return; TB[side] = true;
   while (TQ[side].size && ready) {
-    const list = [...TQ[side]], c = list.find(x => x.stable || x.settled) || list[list.length - 1];
+    const list = [...TQ[side]], c = list.find(x => x.stable) || list[list.length - 1];
     TQ[side].delete(c);
     const src = c.src;
-    if (!src || src === c.trSrc) { wantVoice(c); continue; }
+    if (!src || src === c.trSrc) continue;
     let out = '';
     try { out = ((await mtw('tr', {dir:side, text:src})).text || '').trim(); }
-    catch (e) { console.error(e); wake(); continue; }
+    catch (e) { console.error(e); continue; }
     if (odd(out, c.b.to)) {
       c.b.err = 'Traduzione illeggibile: il modello non ha funzionato. Ricarica la pagina e riscarica i modelli.';
-      mark(c.b); wake(); continue;
+      mark(c.b); continue;
     }
     c.tr = out; c.trSrc = src; mark(c.b);
-    if (c.src !== src) TQ[side].add(c); else wantVoice(c);
+    if (c.src !== src) TQ[side].add(c); else if (side === 'you') warm(c.b);
   }
   TB[side] = false;
 }
 
-/* your sentences are voiced while you are still talking, in short pieces, so Leggi only plays.
-   The first piece is ready long before the last one is built. */
-const VOICE = new Map();          // piece of text -> sound already made
-const VQ = [];                    // what still has to be made, most urgent first
-const waiters = new Set();
-let VB = false;
-const wake = () => { for (const f of [...waiters]) f(); };
+/* your voice: one synthesis, on the exact text you see. One piece is kept ready for the
+   last message, so Leggi usually only has to play it. Nothing else is ever built. */
+let made = {text:'', buf:null}, making = '', warmTm = 0;
+const trOf = b => b.chunks.map(c => c.tr).filter(Boolean).join(' ');
 
-function segments(text){
-  const t = String(text), ends = [], re = /[^.!?…;:,]+[.!?…;:,]*\s*/g;
-  for (let m; (m = re.exec(t)) !== null; ) ends.push(re.lastIndex);
-  if (!ends.length || ends[ends.length - 1] < t.length) ends.push(t.length);
-  const spans = []; let start = 0, last = 0;
-  for (const end of ends) {
-    if (end - start > SEG && last > start) { spans.push([start, last]); start = last; }
-    last = end;
-  }
-  spans.push([start, t.length]);
-  const out = [];                 // every piece is a slice of the translation, never rebuilt from parts
-  for (const [a, b] of spans) {
-    if (t.slice(a, b).trim().length <= SEG * 1.6) { const one = t.slice(a, b).trim(); if (one) out.push(one); continue; }
-    let at = a;
-    while (at < b) {              // a long clause with no punctuation: cut it on a space
-      let stop = Math.min(b, at + SEG);
-      if (stop < b) { const sp = t.lastIndexOf(' ', stop); if (sp > at) stop = sp; }
-      const piece = t.slice(at, stop).trim(); if (piece) out.push(piece);
-      at = stop;
-    }
-  }
-  return out;
+async function synth(text, pri){
+  const r = await vow('tts', {text, pri});
+  const buf = new AudioBuffer({length:Math.max(1, r.audio.length), sampleRate:r.sr, numberOfChannels:1});
+  buf.copyToChannel(r.audio, 0);
+  return buf;
 }
-
-function queueVoice(text, pri){
-  if (!text || VOICE.has(text)) return;
-  const q = VQ.find(x => x.text === text);
-  if (q) { if (pri < q.pri) q.pri = pri; return; }
-  VQ.push({text, pri});
-}
-function wantVoice(c, urgent){
-  if (c.b.side !== 'you' || !hasVoice || !c.tr || c.trSrc !== c.src) return;
-  const segs = segments(c.tr);
-  if (urgent) for (const x of segs) queueVoice(x, -1);
-  else if (c.stable || c.settled) for (const x of segs) queueVoice(x, 1);
-  else for (let i = 0; i < segs.length - 1; i++) queueVoice(segs[i], 2);   // still talking: the closed clauses
-  pumpVoice();
-}
-async function pumpVoice(){
-  if (VB) return; VB = true;
-  while (VQ.length) {
-    VQ.sort((a, b) => a.pri - b.pri);
-    const j = VQ.shift();
-    if (VOICE.has(j.text)) continue;
-    try {
-      const r = await vow('tts', {text:j.text, pri:j.pri});
-      const buf = new AudioBuffer({length:Math.max(1, r.audio.length), sampleRate:r.sr, numberOfChannels:1});
-      buf.copyToChannel(r.audio, 0);
-      VOICE.set(j.text, buf);
-      if (VOICE.size > 80) VOICE.delete(VOICE.keys().next().value);
-    } catch (e) { console.error(e); }
-    wake();
-  }
-  VB = false;
-}
-function audioFor(text){
-  if (VOICE.has(text)) return Promise.resolve(VOICE.get(text));
-  queueVoice(text, -1); pumpVoice();
-  return new Promise(res => {
-    const done = () => { if (!VOICE.has(text)) return; waiters.delete(done); clearTimeout(t); res(VOICE.get(text)); };
-    const t = setTimeout(() => { waiters.delete(done); res(null); }, 12000);
-    waiters.add(done);
-  });
+function warm(bub){
+  clearTimeout(warmTm);
+  warmTm = setTimeout(async () => {
+    const text = trOf(bub);
+    if (!hasVoice || !text || making || made.text === text) return;
+    making = text;
+    try { const buf = await synth(text, 1); if (making === text) made = {text, buf}; }
+    catch (e) { console.error(e); }
+    making = '';
+    if (trOf(bub) !== made.text) warm(bub);     // it moved while this one was being built
+  }, WARM_MS);
 }
 
 /* output: one audio device kept awake from your first click, so nothing has to start up on Leggi */
@@ -838,44 +782,38 @@ async function say(b){
     if (b.side === 'you') {
       if (!hasVoice) throw new Error('La voce per loro non è disponibile in questa lingua.');
       finish(b);
-      const list = [];
-      for (const c of b.chunks) {
-        if (!c.src) continue;
-        await translated(c);
-        if (c.tr) { wantVoice(c, 1); for (const x of segments(c.tr)) list.push(x); }
-      }
-      for (const x of list) { const buf = VOICE.get(x) || await audioFor(x); if (buf) schedule(buf); }
-      await tail;
+      for (const c of b.chunks) await fresh(c);      // never read a stale translation
+      const text = trOf(b);
+      if (text) await play(made.text === text ? made.buf : await synth(text, -1));
     } else {
-      const text = b.chunks.map(c => c.tr).filter(Boolean).join(' ');
+      const text = trOf(b);
       if (text) await speakMac(text, b.to);
     }
   } catch (e) { alert(e.message); }
   btn.classList.remove('go'); btn.disabled = false;
 }
-/* pressed while you were still finishing the sentence: what is on screen becomes the sentence,
-   now, with no wait for Chrome to call it final */
+/* pressed while you were still finishing the sentence: what is on screen becomes the sentence */
 function finish(b){
   if (!b.chunks.some(c => !c.stable)) return;
   cYou.seal();
   cYou.cut();        // and Chrome opens a clean session for whatever you say next
 }
-async function translated(c){
-  if (c.tr && c.trSrc === c.src) return;
-  wantTr(c);
-  for (let i = 0; i < 340 && (!c.tr || c.trSrc !== c.src); i++) await new Promise(r => setTimeout(r, 15));
+async function fresh(c){
+  if (!c.src || (c.tr && c.trSrc === c.src)) return;
+  const src = c.src;
+  try {
+    const out = ((await mtw('tr', {dir:c.b.side, text:src, pri:-1})).text || '').trim();
+    if (out && !odd(out, c.b.to)) { c.tr = out; c.trSrc = src; mark(c.b); }
+  } catch (e) { console.error(e); }
 }
-/* pieces are lined up on the audio clock, so they run into each other without a seam */
-let head = 0, tail = Promise.resolve();
-function schedule(buf){
-  const ctx = outCtx(), src = ctx.createBufferSource();
-  src.buffer = buf; src.connect(ctx.destination);
-  const at = Math.max(ctx.currentTime + .02, head);
-  src.start(at); head = at + buf.duration;
-  const ms = (head - ctx.currentTime) * 1000;
-  muteUntil = Math.max(muteUntil, performance.now() + ms + 400);
-  tail = new Promise(r => { let done = false; const end = () => { if (!done) { done = true; r(); } };
-    src.onended = end; setTimeout(end, ms + 800); });
+function play(buf){
+  return new Promise(r => {
+    const ctx = outCtx(), s = ctx.createBufferSource(), ms = buf.duration * 1000;
+    s.buffer = buf; s.connect(ctx.destination);
+    muteUntil = performance.now() + ms + 400;
+    let done = false; const end = () => { if (!done) { done = true; r(); } };
+    s.onended = end; s.start(); setTimeout(end, ms + 800);
+  });
 }
 async function speakMac(text, lang){
   const v = await pickVoice(lang);
