@@ -170,6 +170,7 @@ async function loadVoice(model, warm, mode){
      so it is only tried when asked for. */
   const why = [], tries = mode === 'gpu'
     ? [[{device:'webgpu', dtype:'fp32'}, 'sulla scheda grafica'], [{device:'webgpu', dtype:'fp16'}, 'sulla scheda grafica']]
+    : mode === 'q4' ? [[{dtype:'q4'}, 'molto compressa'], [{dtype:'q8'}, 'compressa']]
     : mode === 'hq' ? [[{dtype:'fp32'}, 'a qualità piena']]
     : [[{dtype:'q8'}, 'compressa'], [{dtype:'fp32'}, 'a qualità piena']];
   for (const [cfg, name] of tries) {
@@ -277,7 +278,7 @@ const JOIN = 900;    // a pause this short after a finished phrase still belongs
 const get = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const set = (k,v) => { try { localStorage.setItem(k,v); } catch {} };
 const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
-const BUILD = 'v10 · 12 set 2026';
+const BUILD = 'v11 · 12 set 2026';
 let tag = self.crossOriginIsolated ? navigator.hardwareConcurrency + ' core' : '1 core';
 $('ver').textContent = BUILD + ' · ' + tag; console.log('Live Translation ' + BUILD);
 /* one thread is all the page gets until coi.js puts the two missing headers back */
@@ -371,12 +372,13 @@ const mtw = worker(); let vow = worker();
 async function loadVoiceFor(a){
   const pref = get('voce') || '', ask = mode => vow('voice',
     {model:L[a][TTS], warm:WARM[a] || 'Ok.', mode}).catch(e => ({voice:false, why:String(e.message || e)}));
-  if (pref) return ask(pref);
+  if (pref) { const f = await ask(pref); f.forced = pref; return f; }
   const gpu = await ask('gpu');
   if (gpu.voice) return gpu;
   vow.kill(); vow = worker();
   const cpu = await ask('cpu');
-  return cpu.voice ? cpu : {voice:false, why:[gpu.why, cpu.why].filter(Boolean).join(' · ')};
+  cpu.why = [gpu.why, cpu.voice ? '' : cpu.why].filter(Boolean).join(' · ');   // keep the card's reason
+  return cpu;
 }
 
 /* Chrome transcribes on the Mac when it has the language pack, otherwise on Google's servers.
@@ -453,7 +455,7 @@ async function load(){
       (!hasVoice ? ` La tua voce non si è caricata${voiceWhy ? ' (' + voiceWhy + ')' : ''}: premi «Ricarica i modelli».`
         : ` Voce ${v.where}, ` + (v.rate >= 1.5 ? `${Math.round(v.rate)}× più veloce del parlato.`
             : `${v.rate.toFixed(1)}× il parlato: troppo lenta per una riunione.`) +
-          (v.why ? ` Scheda grafica rifiutata — ${v.why}` : ''));
+          (v.forced ? ` Modalità forzata: ${v.forced}.` : v.why ? ` Scheda grafica rifiutata — ${v.why}` : ''));
     $('pr').hidden = true;
     empty('Pronto', '', false);
     status((hasVoice ? 'Pronto. ' : '') + txt, hasVoice ? 'h ok' : 'h bad');
@@ -754,7 +756,7 @@ async function pumpTr(side){
    text is cut into clauses. The first one starts playing while the next is still being built,
    and the first one of the last message is built ahead of time, in case you pause before pressing. */
 const made = new Map();        // clause -> sound already built
-const todo = []; let busyV = false;
+let building = '';             // one at a time, and only the clause you will hear first
 const trOf = b => b.chunks.map(c => c.tr).filter(Boolean).join(' ');
 
 function pieces(text){
@@ -787,20 +789,15 @@ async function synth(text, pri){
   buf.copyToChannel(r.audio, 0);
   return buf;
 }
+/* only the first clause of a finished sentence is built ahead. Building more would mean a press
+   has to wait for whatever is half-built, which is what made the wait grow instead of shrink. */
 function warm(c){
-  if (!hasVoice || !c.stable || !c.tr || c.trSrc !== c.src) return;   // final text only
-  for (const t of pieces(c.tr)) if (!made.has(t) && !todo.includes(t)) todo.push(t);
-  pumpV();
-}
-async function pumpV(){
-  if (busyV) return; busyV = true;
-  while (todo.length) {
-    const t = todo.shift();
-    if (made.has(t)) continue;
-    try { made.set(t, await synth(t, 1)); if (made.size > 40) made.delete(made.keys().next().value); }
-    catch (e) { console.error(e); }
-  }
-  busyV = false;
+  if (!hasVoice || building || !c.stable || !c.tr || c.trSrc !== c.src) return;
+  const t = pieces(c.tr)[0];
+  if (!t || made.has(t)) return;
+  building = t;
+  synth(t, 1).then(b => { made.set(t, b); if (made.size > 40) made.delete(made.keys().next().value); })
+    .catch(e => console.error(e)).finally(() => { building = ''; });
 }
 
 /* output: one audio device kept awake from your first click, so nothing has to start up on Leggi */
