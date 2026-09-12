@@ -268,13 +268,20 @@ const $ = i => document.getElementById(i);
 const SR = 16000, MS = 128/SR*1000;
 const LONG = 8000;   // same person silent this long: the next words open a new message
 const WARM_MS = 600; // text unchanged this long: build the first clause, quietly, in the background
-const PIECE = 60;    // clause size: the shorter, the sooner the first sound, the choppier the reading
+let PIECE = 60;      // clause size, set from the measured speed: short engine, short clauses
 const JOIN = 900;    // a pause this short after a finished phrase still belongs to the same sentence
 const get = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const set = (k,v) => { try { localStorage.setItem(k,v); } catch {} };
 const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
-const BUILD = 'v8 · 12 set 2026';
-$('ver').textContent = BUILD; console.log('Live Translation ' + BUILD);
+const BUILD = 'v9 · 12 set 2026';
+let tag = self.crossOriginIsolated ? navigator.hardwareConcurrency + ' core' : '1 core';
+$('ver').textContent = BUILD + ' · ' + tag; console.log('Live Translation ' + BUILD);
+/* one thread is all the page gets until coi.js puts the two missing headers back */
+if (!self.crossOriginIsolated && 'serviceWorker' in navigator && !sessionStorage.getItem('coi'))
+  navigator.serviceWorker.register('coi.js').then(async () => {
+    await navigator.serviceWorker.ready;
+    if (!navigator.serviceWorker.controller) { sessionStorage.setItem('coi', '1'); location.reload(); }
+  }).catch(e => console.warn('coi.js', e));
 
 let muteUntil = 0, ready = false, hasVoice = false, voiceWhy = '', seq = 0, loadTok = 0;
 const local = {them:false, you:false};
@@ -429,6 +436,12 @@ async function load(){
     pickVoice(b).catch(() => {});
     local.you = sb === 'available'; local.them = sa === 'available';
     hasVoice = v.voice; voiceWhy = v.why || ''; ready = true;
+    if (hasVoice) {
+      tag = (/grafica/.test(v.where) ? 'gpu' : 'cpu') + ' · ' +
+        (self.crossOriginIsolated ? navigator.hardwareConcurrency + ' core' : '1 core');
+      $('ver').textContent = BUILD + ' · ' + tag;
+      PIECE = Math.max(24, Math.min(90, Math.round(8.4 * v.rate)));   // first clause ≈ .6 s of work
+    }
     $('bPack').hidden = !(sb === 'downloadable' || sa === 'downloadable');
     set('ok', a + '|' + b);
     const at = (k, on) => `${L[k][NAME].toLowerCase()} ${on ? 'in locale' : 'sui server Google'}`;
@@ -822,7 +835,7 @@ async function say(b){
         for (let i = 0; i < list.length; i++) {
           const buf = await next;
           next = i + 1 < list.length ? synth(list[i + 1], -1) : null;   // built while this one plays
-          if (!i) $('ver').textContent = BUILD + ' · ' + Math.round(performance.now() - t0) + ' ms';
+          if (!i) $('ver').textContent = `${BUILD} · ${tag} · ${Math.round(performance.now() - t0)} ms`;
           await play(buf);
         }
       }
