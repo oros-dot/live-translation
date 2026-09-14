@@ -162,16 +162,28 @@ async function clear(){
 
 /* MMS cannot run on the graphics card: its duration predictor uses a GatherND the WebGPU backend
    refuses. Kokoro can, and on the card it is an order of magnitude quicker than any WASM thread. */
-async function loadKokoro(warm, voiceId){
+async function loadKokoro(warm, voiceId, wasm){
   const { KokoroTTS } = await import('https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm');
-  const t = await KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX',
-    {dtype:'fp32', device:'webgpu', progress_callback:prog});
-  postMessage({type:'stage', text:'Scaldo la voce…'});
-  await t.generate(warm, {voice:voiceId});
-  const t0 = Date.now(), r = await t.generate(warm, {voice:voiceId});
-  if (!alive(r.audio)) throw new Error('non produce suono');
-  kok = t; kokVoice = voiceId;
-  return ['Kokoro sulla scheda grafica', (r.audio.length / r.sampling_rate) / Math.max(.001, (Date.now() - t0) / 1000)];
+  /* compressed weights first: a quarter of the download and a quarter of the graphics memory,
+     so the translation keeps the card to itself and the network is free for the recogniser */
+  const why = [], tries = wasm ? [['q8', 'wasm', 'Kokoro sul processore']]
+    : [['q8', 'webgpu', 'Kokoro sulla scheda grafica'], ['fp32', 'webgpu', 'Kokoro sulla scheda grafica, intero']];
+  for (const [dtype, device, name] of tries) {
+    try {
+      const t = await KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX',
+        {dtype, device, progress_callback:prog});
+      postMessage({type:'stage', text:'Scaldo la voce…'});
+      await t.generate(warm, {voice:voiceId});
+      const t0 = Date.now(), r = await t.generate(warm, {voice:voiceId});
+      if (!alive(r.audio)) throw new Error('non produce suono');
+      kok = t; kokVoice = voiceId;
+      return [name, (r.audio.length / r.sampling_rate) / Math.max(.001, (Date.now() - t0) / 1000)];
+    } catch (e) {
+      console.warn('kokoro', dtype, device, e);
+      why.push(`${dtype}/${device}: ` + String((e && e.message) || e).slice(0, 100));
+    }
+  }
+  throw new Error(why.join(' · '));
 }
 
 /* a voice that comes out silent or garbled is worse than a slow one: measure before keeping it */
@@ -244,7 +256,7 @@ onmessage = async ({data:m}) => {
     }));
     else if (m.type === 'kokoro') ok(await run(-2, async () => {
       await clear();
-      const [where, rate] = await loadKokoro(m.warm, m.voice);
+      const [where, rate] = await loadKokoro(m.warm, m.voice, m.wasm);
       return {voice:true, where, rate, threads:THREADS};
     }));
     else if (m.type === 'voice') ok(await run(-2, async () => {
@@ -297,7 +309,7 @@ const JOIN = 900;    // a pause this short after a finished phrase still belongs
 const get = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const set = (k,v) => { try { localStorage.setItem(k,v); } catch {} };
 const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
-const BUILD = 'v12 · 12 set 2026';
+const BUILD = 'v13 · 14 set 2026';
 let tag = self.crossOriginIsolated ? navigator.hardwareConcurrency + ' core' : '1 core';
 $('ver').textContent = BUILD + ' · ' + tag; console.log('Live Translation ' + BUILD);
 /* one thread is all the page gets until coi.js puts the two missing headers back */
@@ -391,12 +403,12 @@ const mtw = worker(); let vow = worker();
 async function loadVoiceFor(a){
   const pref = get('voce') || '', ask = mode => vow('voice',
     {model:L[a][TTS], warm:WARM[a] || 'Ok.', mode}).catch(e => ({voice:false, why:String(e.message || e)}));
-  if (pref) { const f = await ask(pref); f.forced = pref; return f; }
+  if (pref && pref !== 'wasm') { const f = await ask(pref); f.forced = pref; return f; }
   let gpu = {voice:false, why:'la scheda grafica non è disponibile'};
-  if (KOK[a] && navigator.gpu) {
-    gpu = await vow('kokoro', {warm:WARM[a] || 'Ok.', voice:KOK[a]})
+  if (KOK[a] && (navigator.gpu || pref === 'wasm')) {
+    gpu = await vow('kokoro', {warm:WARM[a] || 'Ok.', voice:KOK[a], wasm:pref === 'wasm'})
       .catch(e => ({voice:false, why:String(e.message || e).slice(0, 140)}));
-    if (gpu.voice) return gpu;
+    if (gpu.voice) { if (pref) gpu.forced = pref; return gpu; }
     vow.kill(); vow = worker();          // a refused card can leave this worker unusable
   }
   const cpu = await ask('cpu');
