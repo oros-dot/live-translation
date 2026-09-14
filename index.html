@@ -164,10 +164,10 @@ async function clear(){
    refuses. Kokoro can, and on the card it is an order of magnitude quicker than any WASM thread. */
 async function loadKokoro(warm, voiceId, wasm){
   const { KokoroTTS } = await import('https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm');
-  /* compressed weights first: a quarter of the download and a quarter of the graphics memory,
-     so the translation keeps the card to itself and the network is free for the recogniser */
+  /* full weights on the card, compressed ones only on the processor. Compressed weights on the
+     card run fast and speak nonsense, which is the one outcome worse than being slow. */
   const why = [], tries = wasm ? [['q8', 'wasm', 'Kokoro sul processore']]
-    : [['q8', 'webgpu', 'Kokoro sulla scheda grafica'], ['fp32', 'webgpu', 'Kokoro sulla scheda grafica, intero']];
+    : [['fp32', 'webgpu', 'Kokoro sulla scheda grafica'], ['q8', 'wasm', 'Kokoro sul processore']];
   for (const [dtype, device, name] of tries) {
     try {
       const t = await KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX',
@@ -176,6 +176,8 @@ async function loadKokoro(warm, voiceId, wasm){
       await t.generate(warm, {voice:voiceId});
       const t0 = Date.now(), r = await t.generate(warm, {voice:voiceId});
       if (!alive(r.audio)) throw new Error('non produce suono');
+      const secs = r.audio.length / r.sampling_rate;
+      if (secs < warm.length * .02 || secs > warm.length * .35) throw new Error(`durata implausibile (${secs.toFixed(1)}s)`);
       kok = t; kokVoice = voiceId;
       return [name, (r.audio.length / r.sampling_rate) / Math.max(.001, (Date.now() - t0) / 1000)];
     } catch (e) {
@@ -309,7 +311,7 @@ const JOIN = 900;    // a pause this short after a finished phrase still belongs
 const get = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const set = (k,v) => { try { localStorage.setItem(k,v); } catch {} };
 const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
-const BUILD = 'v13 · 14 set 2026';
+const BUILD = 'v14 · 14 set 2026';
 let tag = self.crossOriginIsolated ? navigator.hardwareConcurrency + ' core' : '1 core';
 $('ver').textContent = BUILD + ' · ' + tag; console.log('Live Translation ' + BUILD);
 /* one thread is all the page gets until coi.js puts the two missing headers back */
