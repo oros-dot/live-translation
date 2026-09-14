@@ -311,7 +311,7 @@ const JOIN = 900;    // a pause this short after a finished phrase still belongs
 const get = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const set = (k,v) => { try { localStorage.setItem(k,v); } catch {} };
 const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
-const BUILD = 'v14 · 14 set 2026';
+const BUILD = 'v15 · 14 set 2026';
 let tag = self.crossOriginIsolated ? navigator.hardwareConcurrency + ' core' : '1 core';
 $('ver').textContent = BUILD + ' · ' + tag; console.log('Live Translation ' + BUILD);
 /* one thread is all the page gets until coi.js puts the two missing headers back */
@@ -797,38 +797,39 @@ const made = new Map();        // clause -> sound already built
 let building = '';             // one at a time, and only the clause you will hear first
 const trOf = b => b.chunks.map(c => c.tr).filter(Boolean).join(' ');
 
-function pieces(text){
-  const t = String(text), ends = [], re = /[^.!?…;:,]+[.!?…;:,]*\s*/g;
-  for (let m; (m = re.exec(t)) !== null; ) ends.push(re.lastIndex);
-  if (!ends.length || ends[ends.length - 1] < t.length) ends.push(t.length);
-  const cuts = []; let start = 0, last = 0;
-  for (const end of ends) {
-    if (end - start > PIECE && last > start) { cuts.push([start, last]); start = last; }
-    last = end;
-  }
-  cuts.push([start, t.length]);
-  const out = [];
-  for (const [a, b] of cuts) {
-    if (b - a <= PIECE * 1.5) { const one = t.slice(a, b).trim(); if (one) out.push(one); continue; }
-    let at = a;
-    while (at < b) {                       // no comma in sight: cut it on a space instead
-      let stop = Math.min(b, at + PIECE);
-      if (stop < b) { const sp = t.lastIndexOf(' ', stop); if (sp > at) stop = sp; }
-      const piece = t.slice(at, stop).trim(); if (piece) out.push(piece);
-      at = stop;
-    }
-  }
-  return out;                              // always a slice of the translation, never rebuilt
-}
-
 async function synth(text, pri){
   const r = await vow('tts', {text, pri});
   const buf = new AudioBuffer({length:Math.max(1, r.audio.length), sampleRate:r.sr, numberOfChannels:1});
   buf.copyToChannel(r.audio, 0);
   return buf;
 }
-/* only the first clause of a finished sentence is built ahead. Building more would mean a press
-   has to wait for whatever is half-built, which is what made the wait grow instead of shrink. */
+
+function pieces(text){
+  const t = String(text), ends = [], re = /[^.!?…;:,]+[.!?…;:,]*\s*/g;
+  for (let m; (m = re.exec(t)) !== null; ) ends.push(re.lastIndex);
+  if (!ends.length || ends[ends.length - 1] < t.length) ends.push(t.length);
+  const out = [];
+  const lim = () => out.length ? PIECE * 3 : PIECE;   // first one short to start now, rest long to stay fluent
+  const add = (x, y) => { const one = t.slice(x, y).trim(); if (one) out.push(one); };
+  const span = (x, y) => {
+    while (x < y) {
+      const L = lim();
+      if (y - x <= L * 1.5) { add(x, y); return; }
+      let stop = Math.min(y, x + L);
+      const sp = t.lastIndexOf(' ', stop); if (sp > x) stop = sp;   // cut on a space, never inside a word
+      add(x, stop); x = stop;
+    }
+  };
+  let start = 0, last = 0;
+  for (const end of ends) {
+    if (end - start > lim() && last > start) { span(start, last); start = last; }
+    last = end;
+  }
+  span(start, t.length);
+  return out;                              // always slices of the translation, never rebuilt
+}
+
+
 function warm(c){
   if (!hasVoice || building || !c.stable || !c.tr || c.trSrc !== c.src) return;
   const t = pieces(c.tr)[0];
@@ -885,15 +886,15 @@ async function say(b){
       for (const c of b.chunks) await fresh(c);      // never read a stale translation
       const list = pieces(trOf(b));
       if (list.length) {
-        const t0 = performance.now();
-        const get1 = t => made.get(t) || synth(t, -1);
+        const t0 = performance.now(), get1 = t => made.get(t) || synth(t, -1);
         let next = get1(list[0]);
         for (let i = 0; i < list.length; i++) {
           const buf = await next;
-          next = i + 1 < list.length ? get1(list[i + 1]) : null;        // built while this one plays
+          next = i + 1 < list.length ? get1(list[i + 1]) : null;   // built while this one plays
           if (!i) $('ver').textContent = `${BUILD} · ${tag} · ${Math.round(performance.now() - t0)} ms`;
-          await play(buf);
+          schedule(buf);
         }
+        await tail;
       }
     } else {
       const text = trOf(b);
@@ -916,14 +917,33 @@ async function fresh(c){
     if (out && !odd(out, c.b.to)) { c.tr = out; c.trSrc = src; mark(c.b); }
   } catch (e) { console.error(e); }
 }
-function play(buf){
-  return new Promise(r => {
-    const ctx = outCtx(), s = ctx.createBufferSource(), ms = buf.duration * 1000;
-    s.buffer = buf; s.connect(ctx.destination);
-    muteUntil = performance.now() + ms + 400;
-    let done = false; const end = () => { if (!done) { done = true; r(); } };
-    s.onended = end; s.start(); setTimeout(end, ms + 800);
-  });
+/* Chaining on "the previous one ended" costs a gap at every join. Laying each piece on the audio
+   clock instead makes them run into each other exactly, and the padding of silence the model
+   leaves at both ends is skipped rather than played. */
+let head = 0, tail = Promise.resolve();
+function voiced(buf){
+  const d = buf.getChannelData(0), n = d.length, sr = buf.sampleRate;
+  let peak = 0;
+  for (let i = 0; i < n; i += 13) { const v = Math.abs(d[i]); if (v > peak) peak = v; }
+  if (!peak) return [0, n / sr];
+  const gate = peak * .02, pad = Math.round(sr * .02);
+  let a = 0, b = n - 1;
+  while (a < n && Math.abs(d[a]) < gate) a++;
+  while (b > a && Math.abs(d[b]) < gate) b--;
+  if (b <= a) return [0, n / sr];
+  a = Math.max(0, a - pad); b = Math.min(n - 1, b + pad);
+  return [a / sr, Math.max(.02, (b - a) / sr)];
+}
+function schedule(buf){
+  const ctx = outCtx(), s = ctx.createBufferSource(), [off, dur] = voiced(buf);
+  s.buffer = buf; s.connect(ctx.destination);
+  const at = Math.max(ctx.currentTime + .03, head);
+  s.start(at, off, dur);
+  head = at + dur;
+  const ms = (head - ctx.currentTime) * 1000;
+  muteUntil = Math.max(muteUntil, performance.now() + ms + 400);
+  tail = new Promise(r => { let done = false; const end = () => { if (!done) { done = true; r(); } };
+    s.onended = end; setTimeout(end, ms + 1000); });
 }
 async function speakMac(text, lang){
   const v = await pickVoice(lang);
