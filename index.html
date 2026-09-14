@@ -154,10 +154,24 @@ async function pump(){
   busy = false;
 }
 
-let pipes = [], mt = null, voice = null;
+let pipes = [], mt = null, voice = null, kok = null, kokVoice = '';
 async function clear(){
   for (const p of pipes) { try { await p.dispose(); } catch {} }
-  pipes = []; mt = null; voice = null;
+  pipes = []; mt = null; voice = null; kok = null;
+}
+
+/* MMS cannot run on the graphics card: its duration predictor uses a GatherND the WebGPU backend
+   refuses. Kokoro can, and on the card it is an order of magnitude quicker than any WASM thread. */
+async function loadKokoro(warm, voiceId){
+  const { KokoroTTS } = await import('https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm');
+  const t = await KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX',
+    {dtype:'fp32', device:'webgpu', progress_callback:prog});
+  postMessage({type:'stage', text:'Scaldo la voce…'});
+  await t.generate(warm, {voice:voiceId});
+  const t0 = Date.now(), r = await t.generate(warm, {voice:voiceId});
+  if (!alive(r.audio)) throw new Error('non produce suono');
+  kok = t; kokVoice = voiceId;
+  return ['Kokoro sulla scheda grafica', (r.audio.length / r.sampling_rate) / Math.max(.001, (Date.now() - t0) / 1000)];
 }
 
 /* a voice that comes out silent or garbled is worse than a slow one: measure before keeping it */
@@ -168,9 +182,7 @@ async function loadVoice(model, warm, mode){
   /* compressed weights on the processor run two to three times quicker, and that is what you hear.
      The graphics card is far quicker still but a failed attempt can leave this worker unusable,
      so it is only tried when asked for. */
-  const why = [], tries = mode === 'gpu'
-    ? [[{device:'webgpu', dtype:'fp32'}, 'sulla scheda grafica'], [{device:'webgpu', dtype:'fp16'}, 'sulla scheda grafica']]
-    : mode === 'q4' ? [[{dtype:'q4'}, 'molto compressa'], [{dtype:'q8'}, 'compressa']]
+  const why = [], tries = mode === 'q4' ? [[{dtype:'q4'}, 'molto compressa'], [{dtype:'q8'}, 'compressa']]
     : mode === 'hq' ? [[{dtype:'fp32'}, 'a qualità piena']]
     : [[{dtype:'q8'}, 'compressa'], [{dtype:'fp32'}, 'a qualità piena']];
   for (const [cfg, name] of tries) {
@@ -230,6 +242,11 @@ onmessage = async ({data:m}) => {
       mt = {you:a, them:b};
       return {where};
     }));
+    else if (m.type === 'kokoro') ok(await run(-2, async () => {
+      await clear();
+      const [where, rate] = await loadKokoro(m.warm, m.voice);
+      return {voice:true, where, rate, threads:THREADS};
+    }));
     else if (m.type === 'voice') ok(await run(-2, async () => {
       await clear();
       const [v, where, rate, why, threads] = await loadVoice(m.model, m.warm, m.mode);
@@ -238,7 +255,7 @@ onmessage = async ({data:m}) => {
     }));
     else if (m.type === 'tr') ok({text: await run(m.pri || 0, () => mt[m.dir](m.text))});
     else if (m.type === 'tts') {
-      const a = await run(m.pri || 0, () => voice(m.text));
+      const a = await run(m.pri || 0, () => kok ? kok.generate(m.text, {voice:kokVoice}) : voice(m.text));
       const audio = new Float32Array(a.audio);
       ok({audio, sr:a.sampling_rate}, [audio.buffer]);
     }
@@ -265,6 +282,8 @@ const L = {
 };
 const NAME=0, ASR=1, MT=2, TTS=3, BCP=4;
 /* the voice is warmed on real words of the language it speaks, so the check on it means something */
+const KOK = {en:'af_heart', it:'if_sara', es:'ef_dora', fr:'ff_siwis',
+  pt:'pf_dora', hi:'hf_alpha', ja:'jf_alpha', zh:'zf_xiaobei'};   // the voices Kokoro has
 const WARM = {it:'Va bene, grazie mille.', fi:'Selvä, kiitos paljon.', en:'All right, thank you very much.',
   es:'De acuerdo, muchas gracias.', fr:'D\'accord, merci beaucoup.', de:'In Ordnung, vielen Dank.',
   pt:'Está bem, muito obrigado.', ru:'Хорошо, большое спасибо.', sv:'Okej, tack så mycket.',
@@ -278,7 +297,7 @@ const JOIN = 900;    // a pause this short after a finished phrase still belongs
 const get = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const set = (k,v) => { try { localStorage.setItem(k,v); } catch {} };
 const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
-const BUILD = 'v11 · 12 set 2026';
+const BUILD = 'v12 · 12 set 2026';
 let tag = self.crossOriginIsolated ? navigator.hardwareConcurrency + ' core' : '1 core';
 $('ver').textContent = BUILD + ' · ' + tag; console.log('Live Translation ' + BUILD);
 /* one thread is all the page gets until coi.js puts the two missing headers back */
@@ -373,11 +392,16 @@ async function loadVoiceFor(a){
   const pref = get('voce') || '', ask = mode => vow('voice',
     {model:L[a][TTS], warm:WARM[a] || 'Ok.', mode}).catch(e => ({voice:false, why:String(e.message || e)}));
   if (pref) { const f = await ask(pref); f.forced = pref; return f; }
-  const gpu = await ask('gpu');
-  if (gpu.voice) return gpu;
-  vow.kill(); vow = worker();
+  let gpu = {voice:false, why:'la scheda grafica non è disponibile'};
+  if (KOK[a] && navigator.gpu) {
+    gpu = await vow('kokoro', {warm:WARM[a] || 'Ok.', voice:KOK[a]})
+      .catch(e => ({voice:false, why:String(e.message || e).slice(0, 140)}));
+    if (gpu.voice) return gpu;
+    vow.kill(); vow = worker();          // a refused card can leave this worker unusable
+  }
   const cpu = await ask('cpu');
   cpu.why = [gpu.why, cpu.voice ? '' : cpu.why].filter(Boolean).join(' · ');   // keep the card's reason
+  cpu.why = cpu.why && 'Kokoro rifiutato — ' + cpu.why;
   return cpu;
 }
 
@@ -455,7 +479,7 @@ async function load(){
       (!hasVoice ? ` La tua voce non si è caricata${voiceWhy ? ' (' + voiceWhy + ')' : ''}: premi «Ricarica i modelli».`
         : ` Voce ${v.where}, ` + (v.rate >= 1.5 ? `${Math.round(v.rate)}× più veloce del parlato.`
             : `${v.rate.toFixed(1)}× il parlato: troppo lenta per una riunione.`) +
-          (v.forced ? ` Modalità forzata: ${v.forced}.` : v.why ? ` Scheda grafica rifiutata — ${v.why}` : ''));
+          (v.forced ? ` Modalità forzata: ${v.forced}.` : v.why ? ' ' + v.why : ''));
     $('pr').hidden = true;
     empty('Pronto', '', false);
     status((hasVoice ? 'Pronto. ' : '') + txt, hasVoice ? 'h ok' : 'h bad');
