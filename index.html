@@ -306,7 +306,7 @@ const JOIN = 900;    // a pause this short after a finished phrase still belongs
 const get = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const set = (k,v) => { try { localStorage.setItem(k,v); } catch {} };
 const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
-const BUILD = 'v16 · 14 set 2026';
+const BUILD = 'v17 · 14 set 2026';
 let tag = self.crossOriginIsolated ? navigator.hardwareConcurrency + ' core' : '1 core';
 $('ver').textContent = BUILD + ' · ' + tag; console.log('Live Translation ' + BUILD);
 /* one thread is all the page gets until coi.js puts the two missing headers back */
@@ -350,6 +350,7 @@ function needReload(){
   status('Hai cambiato lingua: riscarica i modelli.');
 }
 
+const fast = () => Object.keys(KOK).filter(k => L[k]).map(k => L[k][NAME].toLowerCase()).join(', ');
 function status(text, cls = 'h'){
   $('hint').className = cls; $('hint').textContent = text;
   const e = $('eh'); if (e) e.textContent = text;
@@ -401,7 +402,8 @@ async function loadVoiceFor(a){
   const pref = get('voce') || '', ask = mode => vow('voice',
     {model:L[a][TTS], warm:WARM[a] || 'Ok.', mode}).catch(e => ({voice:false, why:String(e.message || e)}));
   if (pref && pref !== 'wasm') { const f = await ask(pref); f.forced = pref; return f; }
-  let gpu = {voice:false, why:'la scheda grafica non è disponibile'};
+  let gpu = {voice:false, why: KOK[a] ? 'la scheda grafica non è disponibile'
+    : `Kokoro non ha una voce ${L[a][NAME].toLowerCase()}`};
   if (KOK[a] && (navigator.gpu || pref === 'wasm')) {
     gpu = await vow('kokoro', {warm:WARM[a] || 'Ok.', voice:KOK[a], wasm:pref === 'wasm'})
       .catch(e => ({voice:false, why:String(e.message || e).slice(0, 140)}));
@@ -485,7 +487,10 @@ async function load(){
     const at = (k, on) => `${L[k][NAME].toLowerCase()} ${on ? 'in locale' : 'sui server Google'}`;
     const txt = `Riconoscimento: ${at(b, local.you)}, ${at(a, local.them)}. Traduzione ` +
       (m.where === 'scheda grafica' ? 'sulla scheda grafica.' : 'sul processore, più lenta.') +
-      (!hasVoice ? ` La tua voce non si è caricata${voiceWhy ? ' (' + voiceWhy + ')' : ''}: premi «Ricarica i modelli».`
+      (!hasVoice ? (KOK[a]
+          ? ` La tua voce non si è caricata${voiceWhy ? ' (' + voiceWhy + ')' : ''}: premi «Ricarica i modelli».`
+          : ` Per ${L[a][NAME].toLowerCase()} non esiste una voce utilizzabile nel browser: il testo funziona,` +
+            ` la lettura dei tuoi messaggi no. Voce disponibile per ${fast()}.`)
         : ` Voce ${v.where}, ` + (v.rate >= 1.5 ? `${Math.round(v.rate)}× più veloce del parlato.`
             : `${v.rate.toFixed(1)}× il parlato: troppo lenta per una riunione.`) +
           (v.forced ? ` Modalità forzata: ${v.forced}.` : v.why ? ' ' + v.why : ''));
